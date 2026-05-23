@@ -1,6 +1,6 @@
-# Athena SE
+# Athena 
 
-Athena SE is a single-page systems engineering intelligence dashboard that turns requirement artifacts into a Neo4j-backed semantic knowledge graph, then uses GraphRAG-style traversals to analyze change impact.
+Athena is a single-page systems engineering intelligence dashboard that turns requirement artifacts into a Neo4j-backed semantic knowledge graph, then uses GraphRAG-style traversals to analyze change impact.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ The app works without `OPENAI_API_KEY` by using a deterministic local extractor 
 
 ## Input Quality Handling
 
-Athena SE is designed for mixed engineering document quality. It can inspect spreadsheet-style and document-style inputs with inconsistent names such as `Req ID`, `Requirement Number`, `Object Text`, `Description`, `Shall Statement`, `Owner`, `DRI`, `Verification`, `Test Case`, `Component`, `Allocated To`, `Risk`, and `Safety Critical`.
+Athena is designed for mixed engineering document quality. It can inspect spreadsheet-style and document-style inputs with inconsistent names such as `Req ID`, `Requirement Number`, `Object Text`, `Description`, `Shall Statement`, `Owner`, `DRI`, `Verification`, `Test Case`, `Component`, `Allocated To`, `Risk`, and `Safety Critical`.
 
 When an OpenAI API key is configured, the LLM is instructed to infer where the requirement content lives, ignore revision-history or decorative content, preserve source references, and lower confidence when extraction is ambiguous. The graph database remains the deterministic source of truth after extraction.
 
