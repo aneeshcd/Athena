@@ -28,7 +28,7 @@ def build_pdf_report(analysis: ImpactAnalysisResponse) -> bytes:
     table = Table(
         [
             ["Required Man Hours", metrics.required_man_hours],
-            ["Cost Impact", f"{metrics.cost_impact:,.2f}"],
+            ["Cost Impact", f"EUR {metrics.cost_impact:,.2f}"],
             ["Engineers Affected", metrics.engineers_affected],
             ["Teams Affected", metrics.teams_affected],
             ["Project Delay Days", metrics.project_delay_days],

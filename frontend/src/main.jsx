@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Component, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import cytoscape from "cytoscape";
 import {
@@ -37,17 +37,6 @@ function App() {
   const [status, setStatus] = useState("Ready");
   const [isBusy, setIsBusy] = useState(false);
   const hasActiveGraph = graph.nodes.length > 0;
-
-  useEffect(() => {
-    fetch(`${API_BASE_URL}/api/graph`)
-      .then((response) => (response.ok ? response.json() : null))
-      .then((payload) => {
-        if (payload?.nodes?.length) {
-          setGraph(payload);
-        }
-      })
-      .catch(() => undefined);
-  }, []);
 
   async function uploadArtifact() {
     if (!file) {
@@ -230,12 +219,18 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
   const ref = useRef(null);
   const cyRef = useRef(null);
   const hasGraph = graph.nodes.length > 0;
+  const [graphError, setGraphError] = useState("");
 
   const elements = useMemo(() => {
     const depths = changedNodeId ? calculateDepths(graph, changedNodeId) : new Map();
-    const nodes = graph.nodes.map((node) => ({
-      data: {
-        id: node.id,
+    const nodeIds = new Set();
+    const nodes = graph.nodes.flatMap((node) => {
+      const id = String(node.id || "").trim();
+      if (!id || nodeIds.has(id)) return [];
+      nodeIds.add(id);
+      return [{
+        data: {
+          id,
         label: node.id,
         title: node.label,
         type: node.type,
@@ -246,18 +241,29 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
         confidence: node.confidence,
         changed: node.id === changedNodeId,
         depth: depths.has(node.id) ? depths.get(node.id) : 99,
-      },
-    }));
-    const edges = graph.edges.map((edge) => ({
-      data: {
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
+        },
+      }];
+    });
+    const edgeIds = new Set();
+    const edges = graph.edges.flatMap((edge, index) => {
+      const source = String(edge.source || "").trim();
+      const target = String(edge.target || "").trim();
+      if (!nodeIds.has(source) || !nodeIds.has(target)) return [];
+      const id = String(edge.id || `${source}-${edge.type}-${target}-${index}`);
+      const safeId = edgeIds.has(id) ? `${id}-${index}` : id;
+      edgeIds.add(safeId);
+      return [{
+        data: {
+          id: safeId,
+          source,
+          target,
         label: edge.type,
         rationale: edge.rationale,
         confidence: edge.confidence ?? 0.6,
-      },
-    }));
+        impacted: changedNodeId ? isImpactEdge(edge, depths) : false,
+        },
+      }];
+    });
     return [...nodes, ...edges];
   }, [graph, changedNodeId]);
 
@@ -266,123 +272,139 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
     if (cyRef.current) {
       cyRef.current.destroy();
     }
-    const cy = cytoscape({
-      container: ref.current,
-      elements,
-      layout: changedNodeId
-        ? {
-            name: "concentric",
-            animate: true,
-            padding: 70,
-            minNodeSpacing: 92,
-            levelWidth: () => 1,
-            concentric: (node) => 10 - Math.min(node.data("depth") ?? 9, 9),
-          }
-        : { name: "cose", animate: true, padding: 70, nodeRepulsion: 16000, idealEdgeLength: 140 },
-      style: [
-        {
-          selector: "node",
-          style: {
-            "background-color": "mapData(confidence, 0, 1, #a9b7c7, #22577a)",
-            "border-color": "#ffffff",
-            "border-width": 2,
-            color: "#17202a",
-            label: "data(label)",
-            "font-size": 12,
-            "font-weight": 700,
-            "text-max-width": 88,
-            "text-wrap": "ellipsis",
-            "text-valign": "bottom",
-            "text-margin-y": 10,
-            "text-background-color": "#f8fafc",
-            "text-background-opacity": 0.92,
-            "text-background-padding": 3,
-            width: 46,
-            height: 46,
+    setGraphError("");
+    let cy = null;
+    try {
+      cy = cytoscape({
+        container: ref.current,
+        elements,
+        layout: changedNodeId
+          ? {
+              name: "concentric",
+              animate: true,
+              padding: 80,
+              minNodeSpacing: 110,
+              levelWidth: () => 1,
+              concentric: (node) => 10 - Math.min(node.data("depth") ?? 9, 9),
+            }
+          : { name: "grid", animate: true, padding: 70 },
+        style: [
+          {
+            selector: "node",
+            style: {
+              "background-color": "mapData(confidence, 0, 1, #a9b7c7, #22577a)",
+              "border-color": "#ffffff",
+              "border-width": 2,
+              color: "#17202a",
+              label: "data(label)",
+              "font-size": 12,
+              "font-weight": 700,
+              "text-max-width": 88,
+              "text-wrap": "none",
+              "text-valign": "bottom",
+              "text-margin-y": 10,
+              "text-background-color": "#f8fafc",
+              "text-background-opacity": 0.92,
+              "text-background-padding": 3,
+              width: 46,
+              height: 46,
+            },
           },
-        },
-        { selector: 'node[type = "REQUIREMENT"]', style: { shape: "round-rectangle", "background-color": "#2a9d8f" } },
-        { selector: 'node[type = "COMPONENT"]', style: { shape: "hexagon", "background-color": "#457b9d" } },
-        { selector: 'node[type = "TEST"]', style: { shape: "diamond", "background-color": "#f4a261" } },
-        { selector: 'node[type = "RISK"]', style: { shape: "triangle", "background-color": "#e76f51" } },
-        { selector: "node[depth = 0]", style: { "background-color": "#111827", color: "#111827", width: 58, height: 58 } },
-        { selector: "node[depth = 1]", style: { "background-color": "#e76f51" } },
-        { selector: "node[depth = 2]", style: { "background-color": "#f4a261" } },
-        { selector: "node[depth = 3]", style: { "background-color": "#e9c46a" } },
-        { selector: "node[safety = true]", style: { "border-color": "#d62828", "border-width": 4 } },
-        { selector: "node[changed = true]", style: { "border-color": "#111827", "border-width": 5, width: 52, height: 52 } },
-        {
-          selector: "edge",
-          style: {
-            width: "mapData(confidence, 0, 1, 1, 5)",
-            "line-color": "#8a98a8",
-            "target-arrow-color": "#8a98a8",
-            "target-arrow-shape": "triangle",
-            "curve-style": "bezier",
-            label: "",
-            "font-size": 9,
-            "text-background-color": "#f8fafc",
-            "text-background-opacity": 0.85,
-            "text-background-padding": 2,
+          { selector: 'node[type = "REQUIREMENT"]', style: { shape: "round-rectangle", "background-color": "#2a9d8f" } },
+          { selector: 'node[type = "COMPONENT"]', style: { shape: "hexagon", "background-color": "#457b9d" } },
+          { selector: 'node[type = "TEST"]', style: { shape: "diamond", "background-color": "#f4a261" } },
+          { selector: 'node[type = "RISK"]', style: { shape: "triangle", "background-color": "#e76f51" } },
+          { selector: "node[depth = 0]", style: { "background-color": "#111827", color: "#111827", width: 58, height: 58 } },
+          { selector: "node[depth = 1]", style: { "background-color": "#e76f51" } },
+          { selector: "node[depth = 2]", style: { "background-color": "#f4a261" } },
+          { selector: "node[depth = 3]", style: { "background-color": "#e9c46a" } },
+          { selector: "node[safety = true]", style: { "border-color": "#d62828", "border-width": 4 } },
+          { selector: "node[changed = true]", style: { "border-color": "#111827", "border-width": 5, width: 52, height: 52 } },
+          {
+            selector: "edge",
+            style: {
+              width: "mapData(confidence, 0, 1, 1, 5)",
+              "line-color": "#8a98a8",
+              "target-arrow-color": "#8a98a8",
+              "target-arrow-shape": "triangle",
+              "curve-style": "bezier",
+              label: "",
+              "font-size": 9,
+              "text-background-color": "#f8fafc",
+              "text-background-opacity": 0.85,
+              "text-background-padding": 2,
+            },
           },
-        },
-        {
-          selector: "edge:selected",
-          style: {
-            label: "data(label)",
-            width: 6,
-            "line-color": "#111827",
-            "target-arrow-color": "#111827",
+          {
+            selector: 'edge[label = "SEMANTICALLY_SIMILAR"]',
+            style: {
+              "line-style": "dashed",
+              "line-color": "#64748b",
+              "target-arrow-color": "#64748b",
+            },
           },
-        },
-        {
-          selector: "node:selected",
-          style: {
-            "border-color": "#111827",
-            "border-width": 5,
+          {
+            selector: "edge[impacted = true]",
+            style: {
+              width: "mapData(confidence, 0, 1, 3, 6)",
+              "line-color": "#e76f51",
+              "target-arrow-color": "#e76f51",
+            },
           },
-        },
-        {
-          selector: 'edge[label = "SEMANTICALLY_SIMILAR"]',
-          style: {
-            "line-style": "dashed",
-            "line-color": "#64748b",
-            "target-arrow-color": "#64748b",
+          {
+            selector: "edge:selected",
+            style: {
+              label: "data(label)",
+              width: 6,
+              "line-color": "#111827",
+              "target-arrow-color": "#111827",
+            },
           },
-        },
-      ],
-    });
-    cyRef.current = cy;
-    cy.on("tap", "node", (event) => {
-      const node = event.target;
-      onSelect?.({
-        kind: "node",
-        id: node.id(),
-        title: node.data("title"),
-        type: node.data("type"),
-        sourceRef: node.data("sourceRef"),
-        owner: node.data("owner"),
-        team: node.data("team"),
-        confidence: node.data("confidence"),
+          {
+            selector: "node:selected",
+            style: {
+              "border-color": "#111827",
+              "border-width": 5,
+            },
+          },
+        ],
       });
-      event.target.connectedEdges().animate({ style: { width: 5 } }, { duration: 180 }).delay(220).animate({ style: { width: 2 } });
-    });
-    cy.on("tap", "edge", (event) => {
-      const edge = event.target;
-      onSelect?.({
-        kind: "relationship",
-        id: edge.id(),
-        type: edge.data("label"),
-        source: edge.data("source"),
-        target: edge.data("target"),
-        rationale: edge.data("rationale"),
-        confidence: edge.data("confidence"),
+      cyRef.current = cy;
+      cy.on("tap", "node", (event) => {
+        const node = event.target;
+        onSelect?.({
+          kind: "node",
+          id: node.id(),
+          title: node.data("title"),
+          type: node.data("type"),
+          sourceRef: node.data("sourceRef"),
+          owner: node.data("owner"),
+          team: node.data("team"),
+          confidence: node.data("confidence"),
+        });
+        event.target.connectedEdges().animate({ style: { width: 5 } }, { duration: 180 }).delay(220).animate({ style: { width: 2 } });
       });
-    });
-    cy.on("tap", (event) => {
-      if (event.target === cy) onSelect?.(null);
-    });
-    return () => cy.destroy();
+      cy.on("tap", "edge", (event) => {
+        const edge = event.target;
+        onSelect?.({
+          kind: "relationship",
+          id: edge.id(),
+          type: edge.data("label"),
+          source: edge.data("source"),
+          target: edge.data("target"),
+          rationale: edge.data("rationale"),
+          confidence: edge.data("confidence"),
+        });
+      });
+      cy.on("tap", (event) => {
+        if (event.target === cy) onSelect?.(null);
+      });
+    } catch (error) {
+      setGraphError(error.message || "Graph rendering failed.");
+    }
+    return () => {
+      if (cy) cy.destroy();
+    };
   }, [elements, changedNodeId, onSelect, hasGraph]);
 
   if (!hasGraph) {
@@ -395,7 +417,36 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
     );
   }
 
-  return <div className="graph-canvas" ref={ref} />;
+  return (
+    <div className="graph-stage">
+      {graphError && <div className="graph-error">Graph rendering failed: {graphError}</div>}
+      <div className="graph-canvas" ref={ref} />
+    </div>
+  );
+}
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main className="app-error">
+          <h1>Athena SE</h1>
+          <p>The frontend hit a runtime error.</p>
+          <code>{this.state.error.message}</code>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function GraphInspector({ element }) {
@@ -429,10 +480,15 @@ function GraphInspector({ element }) {
 function calculateDepths(graph, changedNodeId) {
   const adjacency = new Map();
   graph.edges.forEach((edge) => {
-    if (!adjacency.has(edge.source)) adjacency.set(edge.source, []);
-    if (!adjacency.has(edge.target)) adjacency.set(edge.target, []);
-    adjacency.get(edge.source).push(edge.target);
-    adjacency.get(edge.target).push(edge.source);
+    const edgeType = edge.type || edge.label;
+    if (edgeType === "VALIDATES") {
+      addAdjacency(adjacency, edge.target, edge.source);
+    } else if (edgeType === "CONFLICTS_WITH" || edgeType === "SEMANTICALLY_SIMILAR") {
+      addAdjacency(adjacency, edge.source, edge.target);
+      addAdjacency(adjacency, edge.target, edge.source);
+    } else {
+      addAdjacency(adjacency, edge.source, edge.target);
+    }
   });
 
   const depths = new Map([[changedNodeId, 0]]);
@@ -448,6 +504,25 @@ function calculateDepths(graph, changedNodeId) {
     }
   }
   return depths;
+}
+
+function addAdjacency(adjacency, source, target) {
+  if (!adjacency.has(source)) adjacency.set(source, []);
+  adjacency.get(source).push(target);
+}
+
+function isImpactEdge(edge, depths) {
+  if (!depths.size) return false;
+  const sourceDepth = depths.get(edge.source);
+  const targetDepth = depths.get(edge.target);
+  if (sourceDepth === undefined || targetDepth === undefined) return false;
+  if (edge.type === "CONFLICTS_WITH" || edge.type === "SEMANTICALLY_SIMILAR") {
+    return Math.abs(sourceDepth - targetDepth) <= 1;
+  }
+  if (edge.type === "VALIDATES") {
+    return targetDepth < sourceDepth;
+  }
+  return sourceDepth < targetDepth;
 }
 
 function Legend() {
@@ -467,7 +542,7 @@ function Summary({ analysis }) {
     return (
       <div className="empty-summary">
         <AlertTriangle size={28} />
-        <p>Upload an artifact or use the demo graph, then run an analysis to populate reasoning paths, references, confidence, and HITL actions.</p>
+        <p>Upload and ingest an artifact, then run an analysis to populate reasoning paths, references, confidence, and HITL actions.</p>
       </div>
     );
   }
@@ -516,7 +591,7 @@ function Summary({ analysis }) {
 function MetricDashboard({ metrics }) {
   const items = [
     ["Required Man Hours", metrics.required_man_hours],
-    ["Cost Impact", `$${Number(metrics.cost_impact).toLocaleString()}`],
+    ["Cost Impact", `EUR ${Number(metrics.cost_impact).toLocaleString()}`],
     ["Engineers Affected", metrics.engineers_affected],
     ["Teams Affected", metrics.teams_affected],
     ["Project Delay Estimated", `${metrics.project_delay_days} d`],
@@ -537,4 +612,8 @@ function MetricDashboard({ metrics }) {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);

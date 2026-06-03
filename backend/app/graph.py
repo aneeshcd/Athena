@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import deque
+from typing import Iterable
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 
@@ -105,6 +107,7 @@ class GraphRepository:
 
     def match_change_node(self, change_request: str) -> GraphNode | None:
         exact_id = self._extract_id(change_request)
+        query_embedding = embed_texts([change_request], self.settings)[0]
         with self.driver.session() as session:
             if exact_id:
                 row = session.run(
@@ -114,7 +117,7 @@ class GraphRepository:
                 if row:
                     return self._node_from_record(row["n"])
 
-            terms = [term.lower() for term in re.findall(r"[a-zA-Z0-9_-]{3,}", change_request)[:12]]
+            terms = [term.lower() for term in re.findall(r"[a-zA-Z0-9_-]{3,}", change_request)[:18]]
             row = session.run(
                 """
                 MATCH (n:EngineeringEntity)
@@ -126,62 +129,72 @@ class GraphRepository:
                          WHEN toLower(n.description) CONTAINS term THEN 1
                          ELSE 0
                        END
-                     ) AS score
-                WHERE score > 0
-                RETURN n, score
-                ORDER BY score DESC, n.confidence DESC
-                LIMIT 1
+                     ) AS lexical_score
+                RETURN n, lexical_score, coalesce(n.embedding, []) AS embedding
+                ORDER BY lexical_score DESC, n.confidence DESC
+                LIMIT 80
                 """,
                 {"terms": terms},
-            ).single()
-            return self._node_from_record(row["n"]) if row else None
+            )
+            best_node = None
+            best_score = -1.0
+            for candidate in row:
+                lexical_score = float(candidate["lexical_score"] or 0)
+                semantic_score = _cosine_similarity(query_embedding, candidate["embedding"])
+                confidence = float(candidate["n"].get("confidence", 0.75))
+                score = lexical_score + (semantic_score * 4.0) + confidence
+                if score > best_score:
+                    best_score = score
+                    best_node = candidate["n"]
+            return self._node_from_record(best_node) if best_node is not None else None
 
     def downstream_impact(self, node_id: str, max_depth: int = 4) -> tuple[GraphPayload, list[list[str]]]:
+        max_depth = max(1, min(max_depth, 5))
         with self.driver.session() as session:
-            rows = session.run(
-                """
-                MATCH path = (start:EngineeringEntity {id: $node_id})-[*1..4]-(end:EngineeringEntity)
-                WHERE all(rel IN relationships(path) WHERE type(rel) IN [
-                  'DEPENDS_ON', 'VALIDATES', 'CONFLICTS_WITH', 'DERIVED_FROM',
-                  'IMPLEMENTS', 'OWNED_BY', 'BELONGS_TO', 'MITIGATES', 'AFFECTS',
-                  'SEMANTICALLY_SIMILAR'
-                ])
-                RETURN path
-                LIMIT 250
-                """,
-                {"node_id": node_id, "max_depth": max_depth},
-            )
-            node_by_id: dict[str, GraphNode] = {}
-            edge_by_id: dict[str, GraphEdge] = {}
-            paths: list[list[str]] = []
+            node_rows = session.run("MATCH (n:EngineeringEntity) RETURN n")
+            node_by_id = {
+                graph_node.id: graph_node
+                for graph_node in (self._node_from_record(row["n"]) for row in node_rows)
+            }
 
-            for row in rows:
-                path = row["path"]
-                node_ids: list[str] = []
-                for node in path.nodes:
-                    graph_node = self._node_from_record(node)
-                    node_by_id[graph_node.id] = graph_node
-                    node_ids.append(graph_node.id)
-                paths.append(node_ids)
-                for relationship in path.relationships:
-                    source = relationship.start_node["id"]
-                    target = relationship.end_node["id"]
-                    edge = GraphEdge(
-                        id=f"{source}->{relationship.type}->{target}",
-                        source=source,
-                        target=target,
-                        type=relationship.type,
-                        rationale=relationship.get("rationale", ""),
-                        confidence=relationship.get("confidence", 0.75),
-                    )
-                    edge_by_id[edge.id] = edge
+            edge_rows = session.run(
+                """
+                MATCH (a:EngineeringEntity)-[r]->(b:EngineeringEntity)
+                WHERE type(r) IN [
+                  'DEPENDS_ON', 'VALIDATES', 'CONFLICTS_WITH',
+                  'IMPLEMENTS', 'MITIGATES', 'AFFECTS', 'SEMANTICALLY_SIMILAR'
+                ]
+                RETURN a.id AS source, b.id AS target, type(r) AS type,
+                       coalesce(r.rationale, '') AS rationale,
+                       coalesce(r.confidence, 0.75) AS confidence
+                """
+            )
+            edge_by_id = {
+                f"{row['source']}->{row['type']}->{row['target']}": GraphEdge(
+                    id=f"{row['source']}->{row['type']}->{row['target']}",
+                    source=row["source"],
+                    target=row["target"],
+                    type=row["type"],
+                    rationale=row["rationale"],
+                    confidence=row["confidence"],
+                )
+                for row in edge_rows
+            }
 
         if node_id not in node_by_id:
             matched = self.match_change_node(node_id)
             if matched:
                 node_by_id[matched.id] = matched
 
-        return GraphPayload(nodes=list(node_by_id.values()), edges=list(edge_by_id.values())), paths
+        impacted_ids, impacted_edges, paths = _traverse_impacts(node_id, edge_by_id.values(), max_depth)
+        impacted_ids.add(node_id)
+        return (
+            GraphPayload(
+                nodes=[node for node_id, node in node_by_id.items() if node_id in impacted_ids],
+                edges=impacted_edges,
+            ),
+            paths,
+        )
 
     def orphan_requirements(self, node_ids: list[str]) -> list[str]:
         if not node_ids:
@@ -258,6 +271,9 @@ class GraphRepository:
             source_ref=record.get("source_ref"),
             owner=record.get("owner"),
             team=record.get("team"),
+            effort_hours=record.get("effort_hours", 8.0),
+            cost_rate=record.get("cost_rate", 95.0),
+            delay_days=record.get("delay_days", 0.5),
             safety_critical=record.get("safety_critical", False),
             confidence=record.get("confidence", 0.75),
         )
@@ -306,6 +322,9 @@ class MemoryGraphRepository:
                 source_ref=entity.source_ref,
                 owner=entity.owner,
                 team=entity.team,
+                effort_hours=entity.effort_hours,
+                cost_rate=entity.cost_rate,
+                delay_days=entity.delay_days,
                 safety_critical=entity.safety_critical,
                 confidence=entity.confidence,
             )
@@ -335,6 +354,9 @@ class MemoryGraphRepository:
                 source_ref=entity.source_ref,
                 owner=entity.owner,
                 team=entity.team,
+                effort_hours=entity.effort_hours,
+                cost_rate=entity.cost_rate,
+                delay_days=entity.delay_days,
                 safety_critical=entity.safety_critical,
                 confidence=entity.confidence,
             )
@@ -357,34 +379,18 @@ class MemoryGraphRepository:
             source_ref=entity.source_ref,
             owner=entity.owner,
             team=entity.team,
+            effort_hours=entity.effort_hours,
+            cost_rate=entity.cost_rate,
+            delay_days=entity.delay_days,
             safety_critical=entity.safety_critical,
             confidence=entity.confidence,
         )
 
     def downstream_impact(self, node_id: str, max_depth: int = 4) -> tuple[GraphPayload, list[list[str]]]:
-        adjacency: dict[str, list[str]] = {}
-        for rel in self.relationships:
-            adjacency.setdefault(rel.source_id, []).append(rel.target_id)
-            adjacency.setdefault(rel.target_id, []).append(rel.source_id)
-
-        visited = {node_id}
-        queue = deque([(node_id, [node_id], 0)])
-        paths: list[list[str]] = []
-        while queue:
-            current, path, depth = queue.popleft()
-            if depth >= max_depth:
-                continue
-            for target in adjacency.get(current, []):
-                if target in visited:
-                    continue
-                visited.add(target)
-                next_path = path + [target]
-                paths.append(next_path)
-                queue.append((target, next_path, depth + 1))
-
         graph = self.get_graph()
+        visited, edges, paths = _traverse_impacts(node_id, graph.edges, max_depth)
+        visited.add(node_id)
         nodes = [node for node in graph.nodes if node.id in visited]
-        edges = [edge for edge in graph.edges if edge.source in visited and edge.target in visited]
         return GraphPayload(nodes=nodes, edges=edges), paths
 
     def orphan_requirements(self, node_ids: list[str]) -> list[str]:
@@ -412,3 +418,60 @@ def create_repository(settings: Settings) -> GraphRepository | MemoryGraphReposi
         return MemoryGraphRepository(settings)
     except Exception:
         return MemoryGraphRepository(settings)
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right, strict=False))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _traverse_impacts(
+    start_id: str,
+    edges: Iterable[GraphEdge],
+    max_depth: int,
+) -> tuple[set[str], list[GraphEdge], list[list[str]]]:
+    adjacency: dict[str, list[tuple[str, GraphEdge]]] = {}
+    edge_by_step: dict[str, GraphEdge] = {}
+    for edge in edges:
+        for source, target in _impact_steps(edge):
+            adjacency.setdefault(source, []).append((target, edge))
+            edge_by_step[f"{source}->{target}"] = edge
+
+    visited = {start_id}
+    queue = deque([(start_id, [start_id], 0)])
+    paths: list[list[str]] = []
+    while queue:
+        current, path, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for target, _edge in adjacency.get(current, []):
+            if target in visited:
+                continue
+            visited.add(target)
+            next_path = path + [target]
+            paths.append(next_path)
+            queue.append((target, next_path, depth + 1))
+
+    impacted_edge_by_id: dict[str, GraphEdge] = {}
+    for path in paths:
+        for source, target in zip(path, path[1:], strict=False):
+            edge = edge_by_step.get(f"{source}->{target}")
+            if edge:
+                impacted_edge_by_id[edge.id] = edge
+    return visited, list(impacted_edge_by_id.values()), paths
+
+
+def _impact_steps(edge: GraphEdge) -> list[tuple[str, str]]:
+    if edge.type == "VALIDATES":
+        return [(edge.target, edge.source)]
+    if edge.type in {"CONFLICTS_WITH", "SEMANTICALLY_SIMILAR"}:
+        return [(edge.source, edge.target), (edge.target, edge.source)]
+    if edge.type in {"DEPENDS_ON", "IMPLEMENTS", "MITIGATES", "AFFECTS"}:
+        return [(edge.source, edge.target)]
+    return []

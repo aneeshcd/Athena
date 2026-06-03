@@ -42,7 +42,7 @@ class EngineeringEntity(BaseModel):
     artifact_id: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     effort_hours: float = Field(default=8.0, ge=0)
-    cost_rate: float = Field(default=125.0, ge=0)
+    cost_rate: float = Field(default=95.0, ge=0)
     delay_days: float = Field(default=0.5, ge=0)
     safety_critical: bool = False
     confidence: float = Field(default=0.75, ge=0, le=1)
@@ -73,6 +73,9 @@ class GraphNode(BaseModel):
     source_ref: str | None = None
     owner: str | None = None
     team: str | None = None
+    effort_hours: float = 8.0
+    cost_rate: float = 95.0
+    delay_days: float = 0.5
     safety_critical: bool = False
     confidence: float = 0.75
 

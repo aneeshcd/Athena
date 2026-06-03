@@ -260,6 +260,54 @@ button:disabled {
   min-height: 0;
 }
 
+.graph-stage {
+  min-height: 0;
+  position: relative;
+  display: grid;
+}
+
+.graph-stage .graph-canvas {
+  min-height: 100%;
+}
+
+.graph-error {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  background: #fff1f2;
+  color: #9f1239;
+  font-size: 13px;
+}
+
+.app-error {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: #f8fafc;
+  color: #17202a;
+}
+
+.app-error h1,
+.app-error p {
+  margin: 0;
+}
+
+.app-error code {
+  max-width: 720px;
+  padding: 12px;
+  border-radius: 7px;
+  background: #fee2e2;
+  color: #991b1b;
+  white-space: pre-wrap;
+}
+
 .graph-empty {
   min-height: 0;
   display: grid;

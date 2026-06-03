@@ -243,7 +243,7 @@ def _fallback_normalize(raw_text: str, filename: str, document_id: str) -> Norma
             team=team,
             artifact_id=artifact_id,
             effort_hours=_estimate_effort(entity_type, safety),
-            cost_rate=140 if safety else 125,
+            cost_rate=95,
             delay_days=_estimate_delay(entity_type, safety),
             safety_critical=safety,
             confidence=0.62,
@@ -399,7 +399,7 @@ def _generic_table_normalize(raw_text: str, filename: str, document_id: str) -> 
                 team=team,
                 artifact_id=artifact_id,
                 effort_hours=_estimate_effort(entity_type, safety),
-                cost_rate=140 if safety else 125,
+                cost_rate=95,
                 delay_days=_estimate_delay(entity_type, safety),
                 safety_critical=safety,
                 confidence=0.72,
@@ -509,7 +509,7 @@ def _try_parse_reqsim_export(raw_text: str, filename: str, document_id: str) -> 
                     team=_team_from_source(source_file),
                     artifact_id=key,
                     effort_hours=_estimate_effort("REQUIREMENT", safety),
-                    cost_rate=140 if safety else 125,
+                    cost_rate=95,
                     delay_days=_estimate_delay("REQUIREMENT", safety),
                     safety_critical=safety,
                     confidence=confidence,
@@ -868,7 +868,7 @@ _DESCRIPTION_HEADERS = {
 }
 _TYPE_HEADERS = {"type", "artifact type", "category", "kind", "object type"}
 _OWNER_HEADERS = {"owner", "engineer", "responsible", "assignee", "author", "dr i", "dri"}
-_TEAM_HEADERS = {"team", "department", "group", "discipline", "function"}
+_TEAM_HEADERS = {"team", "department", "group", "discipline", "function", "label", "category"}
 _SAFETY_HEADERS = {"safety", "safety critical", "asil", "criticality", "hazard"}
 _TEST_HEADERS = {"test", "verification", "validation", "test case", "verification method", "verifies"}
 _COMPONENT_HEADERS = {"component", "module", "subsystem", "system", "interface", "allocated to"}

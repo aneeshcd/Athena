@@ -106,6 +106,9 @@ def graph_from_artifact(artifact) -> GraphPayload:
             source_ref=entity.source_ref,
             owner=entity.owner,
             team=entity.team,
+            effort_hours=entity.effort_hours,
+            cost_rate=entity.cost_rate,
+            delay_days=entity.delay_days,
             safety_critical=entity.safety_critical,
             confidence=entity.confidence,
         )
