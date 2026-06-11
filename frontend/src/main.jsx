@@ -4,126 +4,89 @@ import cytoscape from "cytoscape";
 import {
   Activity,
   AlertTriangle,
-  Brain,
-  Download,
   FileUp,
   Network,
   Play,
+  Search,
   ShieldCheck,
 } from "lucide-react";
 import "./styles.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-
 const initialGraph = { nodes: [], edges: [] };
-
-const emptyMetrics = {
-  required_man_hours: 0,
-  cost_impact: 0,
-  engineers_affected: 0,
-  teams_affected: 0,
-  project_delay_days: 0,
-  risk_category: "Low",
-  safety_impact: "None",
-  ai_confidence_level: 0,
-};
 
 function App() {
   const [graph, setGraph] = useState(initialGraph);
   const [file, setFile] = useState(null);
-  const [changeRequest, setChangeRequest] = useState("");
-  const [analysis, setAnalysis] = useState(null);
+  const [changeText, setChangeText] = useState("");
+  const [selectedRequirement, setSelectedRequirement] = useState(null);
   const [selectedElement, setSelectedElement] = useState(null);
+  const [ingestSummary, setIngestSummary] = useState(null);
+  const [ontology, setOntology] = useState([]);
   const [status, setStatus] = useState("Ready");
   const [isBusy, setIsBusy] = useState(false);
-  const hasActiveGraph = graph.nodes.length > 0;
 
-  async function uploadArtifact() {
+  async function uploadArtefact() {
     if (!file) {
-      setStatus("Select a requirement artifact first.");
+      setStatus("Select an Excel artefact first.");
       return;
     }
     setIsBusy(true);
-    setStatus("Ingesting artifact and building graph...");
+    setStatus("Ingesting Excel artefact into Neo4j...");
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch(`${API_BASE_URL}/api/ingest`, {
+      const response = await fetch(`${API_BASE_URL}/api/graph/ingest`, {
         method: "POST",
         body: formData,
       });
       if (!response.ok) throw new Error(await response.text());
-      const payload = await response.json();
-      setGraph(payload.graph);
-      setAnalysis(null);
-      const firstRequirement = payload.artifact.entities.find((entity) => entity.type === "REQUIREMENT");
-      if (firstRequirement) {
-        setChangeRequest(
-          `Change requirement ${firstRequirement.id}: ${firstRequirement.description} Analyze related requirements, similarity links, risks, teams, effort, cost, and schedule delay.`,
-        );
-      }
+      const summary = await response.json();
+      setIngestSummary(summary);
+      setGraph(initialGraph);
+      setSelectedRequirement(null);
+      setSelectedElement(null);
+      setOntology(await fetchOntology());
       setStatus(
-        `Loaded ${payload.graph.nodes.length} nodes and ${payload.graph.edges.length} relationships from ${payload.artifact.filename}.`,
+        `Loaded ${summary.nodes_created} nodes, ${summary.edges_created} relationships, and ${summary.ontology_rules_created} ontology rules.`,
       );
     } catch (error) {
-      setStatus(`Ingestion failed: ${error.message}`);
+      setStatus(`Ingest failed: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
   }
 
-  async function analyzeChange() {
-    if (!hasActiveGraph) {
-      setStatus("Upload a file and click Ingest Artifact before analysis.");
-      return;
-    }
-    if (!changeRequest.trim()) {
-      setStatus("Enter the requirement change before analysis.");
+  async function findImpactedNodes() {
+    if (!changeText.trim()) {
+      setStatus("Enter the requirement change text first.");
       return;
     }
     setIsBusy(true);
-    setStatus("Tracing blast radius through the knowledge graph...");
+    setStatus("Building impact map from the best matching Requirement...");
     try {
-      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
+      const response = await fetch(`${API_BASE_URL}/api/graph/impact-analysis`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ change_request: changeRequest }),
+        body: JSON.stringify({ changeText, depth: 2 }),
       });
       if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
-      setAnalysis(payload);
-      setGraph(payload.graph.nodes.length ? payload.graph : graph);
-      setStatus(`Analysis complete for ${payload.changed_node_id}.`);
+      setSelectedRequirement(payload.selectedRequirement);
+      setGraph(payload.impactGraph);
+      setSelectedElement(null);
+      setStatus(`Impact map loaded from ${payload.selectedRequirement.id}.`);
     } catch (error) {
-      setStatus(`Analysis failed: ${error.message}`);
+      setStatus(`Impact analysis failed: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
   }
 
-  async function downloadPdf() {
-    if (!analysis) {
-      setStatus("Run an impact analysis before downloading a report.");
-      return;
-    }
-    setStatus("Generating PDF report...");
-    const response = await fetch(`${API_BASE_URL}/api/report/pdf`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysis }),
-    });
-    if (!response.ok) {
-      setStatus("PDF generation failed.");
-      return;
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "athena-se-impact-report.pdf";
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setStatus("PDF report downloaded.");
+  async function fetchOntology() {
+    const response = await fetch(`${API_BASE_URL}/api/graph/ontology`);
+    if (!response.ok) return [];
+    return response.json();
   }
 
   return (
@@ -131,7 +94,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>Athena SE</h1>
-          <p>Graph-grounded change intelligence for systems engineering.</p>
+          <p>Neo4j requirement change graph prototype.</p>
         </div>
         <div className="status-pill">
           <Activity size={16} />
@@ -144,39 +107,36 @@ function App() {
           <section className="panel-block">
             <div className="section-title">
               <FileUp size={18} />
-              <h2>Input & Control</h2>
+              <h2>Artefact Upload</h2>
             </div>
             <label className="upload-zone">
               <input
                 type="file"
-                accept=".pdf,.txt,.md,.csv,.tsv,.xlsx,.xlsm"
+                accept=".xlsx,.xlsm"
                 onChange={(event) => setFile(event.target.files?.[0] || null)}
               />
-              <span>{file ? file.name : "Upload requirements, tests, risks, or interface specs"}</span>
+              <span>{file ? file.name : "Upload Excel with nodes, edges, and ontology sheets"}</span>
             </label>
-            <button className="secondary-button" onClick={uploadArtifact} disabled={isBusy}>
+            <button className="secondary-button" onClick={uploadArtefact} disabled={isBusy}>
               <FileUp size={17} />
-              Ingest Artifact
+              Ingest Artefact
             </button>
           </section>
 
           <section className="panel-block fill">
             <div className="section-title">
-              <Brain size={18} />
-              <h2>Change Request</h2>
+              <Search size={18} />
+              <h2>Requirement Change</h2>
             </div>
             <textarea
-              value={changeRequest}
-              onChange={(event) => setChangeRequest(event.target.value)}
-              placeholder="Upload a requirement artifact, then specify the exact requirement or behavior change..."
+              value={changeText}
+              onChange={(event) => setChangeText(event.target.value)}
+              placeholder="Describe the requirement change to analyze..."
             />
-            <button className="primary-button" onClick={analyzeChange} disabled={isBusy}>
+            <button className="primary-button" onClick={findImpactedNodes} disabled={isBusy}>
               <Play size={18} />
-              Analyze Change
+              Find impacted nodes
             </button>
-            {!hasActiveGraph && (
-              <p className="control-hint">Analysis unlocks after a file is ingested.</p>
-            )}
           </section>
         </aside>
 
@@ -184,15 +144,11 @@ function App() {
           <div className="visual-header">
             <div className="section-title">
               <Network size={18} />
-              <h2>Semantic Impact Map</h2>
+              <h2>Knowledge Graph</h2>
             </div>
             <Legend />
           </div>
-          <ImpactGraph
-            graph={graph}
-            changedNodeId={analysis?.changed_node_id}
-            onSelect={setSelectedElement}
-          />
+          <ImpactGraph graph={graph} onSelect={setSelectedElement} />
           <GraphInspector element={selectedElement} />
         </section>
 
@@ -200,29 +156,24 @@ function App() {
           <div className="summary-header">
             <div className="section-title">
               <ShieldCheck size={18} />
-              <h2>Summary & Next Steps</h2>
+              <h2>Impacted Nodes & Relationships</h2>
             </div>
-            <button className="icon-button" onClick={downloadPdf} title="Download PDF report">
-              <Download size={18} />
-            </button>
           </div>
-          <Summary analysis={analysis} />
+          <ImpactDetails selectedRequirement={selectedRequirement} graph={graph} />
+          <OntologyPanel ontology={ontology} ingestSummary={ingestSummary} />
         </aside>
       </section>
-
-      <MetricDashboard metrics={analysis?.metrics || emptyMetrics} />
     </main>
   );
 }
 
-function ImpactGraph({ graph, changedNodeId, onSelect }) {
+function ImpactGraph({ graph, onSelect }) {
   const ref = useRef(null);
   const cyRef = useRef(null);
   const hasGraph = graph.nodes.length > 0;
   const [graphError, setGraphError] = useState("");
 
   const elements = useMemo(() => {
-    const depths = changedNodeId ? calculateDepths(graph, changedNodeId) : new Map();
     const nodeIds = new Set();
     const nodes = graph.nodes.flatMap((node) => {
       const id = String(node.id || "").trim();
@@ -231,16 +182,12 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
       return [{
         data: {
           id,
-        label: node.id,
-        title: node.label,
-        type: node.type,
-        sourceRef: node.source_ref,
-        owner: node.owner,
-        team: node.team,
-        safety: node.safety_critical,
-        confidence: node.confidence,
-        changed: node.id === changedNodeId,
-        depth: depths.has(node.id) ? depths.get(node.id) : 99,
+          label: node.label || node.id,
+          title: node.name || node.label || node.id,
+          description: node.description,
+          type: node.type,
+          criticality: node.criticality,
+          status: node.status || "normal",
         },
       }];
     });
@@ -249,7 +196,8 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
       const source = String(edge.source || "").trim();
       const target = String(edge.target || "").trim();
       if (!nodeIds.has(source) || !nodeIds.has(target)) return [];
-      const id = String(edge.id || `${source}-${edge.type}-${target}-${index}`);
+      const relationship = edge.relationship || edge.type;
+      const id = String(edge.id || `${source}-${relationship}-${target}-${index}`);
       const safeId = edgeIds.has(id) ? `${id}-${index}` : id;
       edgeIds.add(safeId);
       return [{
@@ -257,50 +205,38 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
           id: safeId,
           source,
           target,
-        label: edge.type,
-        rationale: edge.rationale,
-        confidence: edge.confidence ?? 0.6,
-        impacted: changedNodeId ? isImpactEdge(edge, depths) : false,
+          label: relationship,
+          description: edge.description || edge.rationale,
+          status: edge.status || "normal",
         },
       }];
     });
     return [...nodes, ...edges];
-  }, [graph, changedNodeId]);
+  }, [graph]);
 
   useEffect(() => {
     if (!ref.current || !hasGraph) return;
-    if (cyRef.current) {
-      cyRef.current.destroy();
-    }
+    if (cyRef.current) cyRef.current.destroy();
     setGraphError("");
     let cy = null;
     try {
       cy = cytoscape({
         container: ref.current,
         elements,
-        layout: changedNodeId
-          ? {
-              name: "concentric",
-              animate: true,
-              padding: 80,
-              minNodeSpacing: 110,
-              levelWidth: () => 1,
-              concentric: (node) => 10 - Math.min(node.data("depth") ?? 9, 9),
-            }
-          : { name: "grid", animate: true, padding: 70 },
+        layout: { name: "cose", animate: true, padding: 70, nodeRepulsion: 9000 },
         style: [
           {
             selector: "node",
             style: {
-              "background-color": "mapData(confidence, 0, 1, #a9b7c7, #22577a)",
+              "background-color": "#457b9d",
               "border-color": "#ffffff",
               "border-width": 2,
               color: "#17202a",
               label: "data(label)",
-              "font-size": 12,
+              "font-size": 13,
               "font-weight": 700,
-              "text-max-width": 88,
-              "text-wrap": "none",
+              "text-max-width": 96,
+              "text-wrap": "wrap",
               "text-valign": "bottom",
               "text-margin-y": 10,
               "text-background-color": "#f8fafc",
@@ -310,63 +246,27 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
               height: 46,
             },
           },
-          { selector: 'node[type = "REQUIREMENT"]', style: { shape: "round-rectangle", "background-color": "#2a9d8f" } },
-          { selector: 'node[type = "COMPONENT"]', style: { shape: "hexagon", "background-color": "#457b9d" } },
-          { selector: 'node[type = "TEST"]', style: { shape: "diamond", "background-color": "#f4a261" } },
-          { selector: 'node[type = "RISK"]', style: { shape: "triangle", "background-color": "#e76f51" } },
-          { selector: "node[depth = 0]", style: { "background-color": "#111827", color: "#111827", width: 58, height: 58 } },
-          { selector: "node[depth = 1]", style: { "background-color": "#e76f51" } },
-          { selector: "node[depth = 2]", style: { "background-color": "#f4a261" } },
-          { selector: "node[depth = 3]", style: { "background-color": "#e9c46a" } },
-          { selector: "node[safety = true]", style: { "border-color": "#d62828", "border-width": 4 } },
-          { selector: "node[changed = true]", style: { "border-color": "#111827", "border-width": 5, width: 52, height: 52 } },
+          { selector: 'node[type = "Requirement"]', style: { shape: "round-rectangle", "background-color": "#2a9d8f" } },
+          { selector: 'node[type = "Subsystem"]', style: { shape: "hexagon", "background-color": "#457b9d" } },
+          { selector: 'node[type = "Test"]', style: { shape: "diamond", "background-color": "#f4a261" } },
+          { selector: 'node[type = "Risk"]', style: { shape: "triangle", "background-color": "#e76f51" } },
+          { selector: 'node[type = "Team"]', style: { shape: "ellipse", "background-color": "#6b7280" } },
+          { selector: 'node[status = "selected"]', style: { "background-color": "#111827", "border-color": "#f4a261", "border-width": 5, width: 58, height: 58 } },
+          { selector: 'node[status = "impacted"]', style: { "border-color": "#e76f51", "border-width": 4 } },
           {
             selector: "edge",
             style: {
-              width: "mapData(confidence, 0, 1, 1, 5)",
+              width: 3,
               "line-color": "#8a98a8",
               "target-arrow-color": "#8a98a8",
               "target-arrow-shape": "triangle",
               "curve-style": "bezier",
               label: "",
-              "font-size": 9,
-              "text-background-color": "#f8fafc",
-              "text-background-opacity": 0.85,
-              "text-background-padding": 2,
             },
           },
-          {
-            selector: 'edge[label = "SEMANTICALLY_SIMILAR"]',
-            style: {
-              "line-style": "dashed",
-              "line-color": "#64748b",
-              "target-arrow-color": "#64748b",
-            },
-          },
-          {
-            selector: "edge[impacted = true]",
-            style: {
-              width: "mapData(confidence, 0, 1, 3, 6)",
-              "line-color": "#e76f51",
-              "target-arrow-color": "#e76f51",
-            },
-          },
-          {
-            selector: "edge:selected",
-            style: {
-              label: "data(label)",
-              width: 6,
-              "line-color": "#111827",
-              "target-arrow-color": "#111827",
-            },
-          },
-          {
-            selector: "node:selected",
-            style: {
-              "border-color": "#111827",
-              "border-width": 5,
-            },
-          },
+          { selector: 'edge[status = "ontology-link"]', style: { "line-color": "#e76f51", "target-arrow-color": "#e76f51", width: 4 } },
+          { selector: "edge:selected", style: { label: "data(label)", width: 6, "line-color": "#111827", "target-arrow-color": "#111827" } },
+          { selector: "node:selected", style: { "border-color": "#111827", "border-width": 5 } },
         ],
       });
       cyRef.current = cy;
@@ -376,13 +276,11 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
           kind: "node",
           id: node.id(),
           title: node.data("title"),
+          description: node.data("description"),
           type: node.data("type"),
-          sourceRef: node.data("sourceRef"),
-          owner: node.data("owner"),
-          team: node.data("team"),
-          confidence: node.data("confidence"),
+          criticality: node.data("criticality"),
+          status: node.data("status"),
         });
-        event.target.connectedEdges().animate({ style: { width: 5 } }, { duration: 180 }).delay(220).animate({ style: { width: 2 } });
       });
       cy.on("tap", "edge", (event) => {
         const edge = event.target;
@@ -392,8 +290,8 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
           type: edge.data("label"),
           source: edge.data("source"),
           target: edge.data("target"),
-          rationale: edge.data("rationale"),
-          confidence: edge.data("confidence"),
+          description: edge.data("description"),
+          status: edge.data("status"),
         });
       });
       cy.on("tap", (event) => {
@@ -405,14 +303,14 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
     return () => {
       if (cy) cy.destroy();
     };
-  }, [elements, changedNodeId, onSelect, hasGraph]);
+  }, [elements, onSelect, hasGraph]);
 
   if (!hasGraph) {
     return (
       <div className="graph-empty">
         <Network size={30} />
-        <strong>No uploaded graph yet</strong>
-        <span>Select your requirements file and click Ingest Artifact.</span>
+        <strong>No impact graph yet</strong>
+        <span>Ingest an Excel artefact, enter a change, and find impacted nodes.</span>
       </div>
     );
   }
@@ -421,6 +319,112 @@ function ImpactGraph({ graph, changedNodeId, onSelect }) {
     <div className="graph-stage">
       {graphError && <div className="graph-error">Graph rendering failed: {graphError}</div>}
       <div className="graph-canvas" ref={ref} />
+    </div>
+  );
+}
+
+function ImpactDetails({ selectedRequirement, graph }) {
+  if (!selectedRequirement) {
+    return (
+      <div className="empty-summary compact">
+        <AlertTriangle size={26} />
+        <p>The selected starting requirement and impacted graph details appear after analysis.</p>
+      </div>
+    );
+  }
+  const impactedNodes = graph.nodes.filter((node) => node.status === "impacted");
+  const selectedNode = graph.nodes.find((node) => node.id === selectedRequirement.id);
+  return (
+    <div className="impact-details">
+      <div className="selected-requirement">
+        <span>Selected Requirement</span>
+        <strong>{selectedRequirement.id} - {selectedRequirement.name}</strong>
+        <small>{selectedRequirement.criticality || "No criticality"} | {selectedNode?.type || selectedRequirement.type}</small>
+      </div>
+
+      <div className="impact-section">
+        <h3>Impacted Nodes</h3>
+        <div className="impact-list">
+          {impactedNodes.length ? impactedNodes.map((node) => (
+            <div className="impact-card" key={node.id}>
+              <strong>{node.id} - {node.name}</strong>
+              <span>{node.type} | {node.criticality || "No criticality"}</span>
+            </div>
+          )) : <span className="impact-empty">No impacted nodes were returned.</span>}
+        </div>
+      </div>
+
+      <div className="impact-section">
+        <h3>Connected Relationships</h3>
+        <div className="impact-list">
+          {graph.edges.length ? graph.edges.map((edge) => (
+            <div className="impact-card" key={edge.id}>
+              <strong>{edge.relationship}</strong>
+              <span>{edge.source} - {edge.target}</span>
+            </div>
+          )) : <span className="impact-empty">No ontology relationships were returned.</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OntologyPanel({ ontology, ingestSummary }) {
+  return (
+    <div className="ontology-panel">
+      {ingestSummary && (
+        <div className={ingestSummary.invalid_edges.length ? "validation-box warning" : "validation-box"}>
+          <strong>{ingestSummary.invalid_edges.length ? "Invalid ontology edges" : "Ontology validation passed"}</strong>
+          <span>{ingestSummary.invalid_edges.length} invalid relationship(s) found during ingest.</span>
+        </div>
+      )}
+      <h3>Ontology Rules</h3>
+      <div className="ontology-list">
+        {ontology.length ? ontology.map((rule) => (
+          <span key={`${rule.source_entity}-${rule.relationship}-${rule.target_entity}`}>
+            {rule.source_entity} - {rule.relationship} - {rule.target_entity}
+          </span>
+        )) : <span>No ontology rules loaded.</span>}
+      </div>
+    </div>
+  );
+}
+
+function GraphInspector({ element }) {
+  if (!element) {
+    return (
+      <div className="graph-inspector">
+        <strong>Graph detail</strong>
+        <span>Select a node or relationship to inspect graph data.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="graph-inspector">
+      <strong>{element.kind === "node" ? element.id : element.type}</strong>
+      {element.kind === "node" ? (
+        <>
+          <span>{element.title}</span>
+          <small>{element.type} | {element.criticality || "No criticality"} | {element.status}</small>
+        </>
+      ) : (
+        <>
+          <span>{element.source} - {element.type} - {element.target}</span>
+          <small>{element.description || "No relationship description"} | {element.status}</small>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Legend() {
+  return (
+    <div className="legend">
+      <span><i className="req" />Requirement</span>
+      <span><i className="comp" />Subsystem</span>
+      <span><i className="test" />Test</span>
+      <span><i className="risk" />Risk</span>
+      <span><i className="selected" />Selected</span>
     </div>
   );
 }
@@ -447,169 +451,6 @@ class ErrorBoundary extends Component {
     }
     return this.props.children;
   }
-}
-
-function GraphInspector({ element }) {
-  if (!element) {
-    return (
-      <div className="graph-inspector">
-        <strong>Graph detail</strong>
-        <span>Select a node or relationship to inspect its source, owner, and confidence.</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="graph-inspector">
-      <strong>{element.kind === "node" ? element.id : element.type}</strong>
-      {element.kind === "node" ? (
-        <>
-          <span>{element.title}</span>
-          <small>{element.type} | {element.team || "No team"} | {element.sourceRef || "No source"}</small>
-        </>
-      ) : (
-        <>
-          <span>{element.source} -> {element.target}</span>
-          <small>{element.rationale || "No relationship rationale"} | confidence {Math.round((element.confidence || 0) * 100)}%</small>
-        </>
-      )}
-    </div>
-  );
-}
-
-function calculateDepths(graph, changedNodeId) {
-  const adjacency = new Map();
-  graph.edges.forEach((edge) => {
-    const edgeType = edge.type || edge.label;
-    if (edgeType === "VALIDATES") {
-      addAdjacency(adjacency, edge.target, edge.source);
-    } else if (edgeType === "CONFLICTS_WITH" || edgeType === "SEMANTICALLY_SIMILAR") {
-      addAdjacency(adjacency, edge.source, edge.target);
-      addAdjacency(adjacency, edge.target, edge.source);
-    } else {
-      addAdjacency(adjacency, edge.source, edge.target);
-    }
-  });
-
-  const depths = new Map([[changedNodeId, 0]]);
-  const queue = [changedNodeId];
-  while (queue.length) {
-    const current = queue.shift();
-    const nextDepth = depths.get(current) + 1;
-    for (const next of adjacency.get(current) || []) {
-      if (!depths.has(next)) {
-        depths.set(next, nextDepth);
-        queue.push(next);
-      }
-    }
-  }
-  return depths;
-}
-
-function addAdjacency(adjacency, source, target) {
-  if (!adjacency.has(source)) adjacency.set(source, []);
-  adjacency.get(source).push(target);
-}
-
-function isImpactEdge(edge, depths) {
-  if (!depths.size) return false;
-  const sourceDepth = depths.get(edge.source);
-  const targetDepth = depths.get(edge.target);
-  if (sourceDepth === undefined || targetDepth === undefined) return false;
-  if (edge.type === "CONFLICTS_WITH" || edge.type === "SEMANTICALLY_SIMILAR") {
-    return Math.abs(sourceDepth - targetDepth) <= 1;
-  }
-  if (edge.type === "VALIDATES") {
-    return targetDepth < sourceDepth;
-  }
-  return sourceDepth < targetDepth;
-}
-
-function Legend() {
-  return (
-    <div className="legend">
-      <span><i className="req" />Requirement</span>
-      <span><i className="comp" />Component</span>
-      <span><i className="test" />Test</span>
-      <span><i className="risk" />Risk</span>
-      <span><i className="depth1" />Near impact</span>
-    </div>
-  );
-}
-
-function Summary({ analysis }) {
-  if (!analysis) {
-    return (
-      <div className="empty-summary">
-        <AlertTriangle size={28} />
-        <p>Upload and ingest an artifact, then run an analysis to populate reasoning paths, references, confidence, and HITL actions.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="summary-scroll">
-      <div className="confidence-row">
-        <span>Confidence</span>
-        <strong>{Math.round(analysis.confidence_score * 100)}%</strong>
-      </div>
-      <p className="summary-text">{analysis.summary}</p>
-
-      <h3>Reasoning Paths</h3>
-      <ul>
-        {analysis.reasoning_paths.map((path) => (
-          <li key={path}>{path}</li>
-        ))}
-      </ul>
-
-      <h3>Source References</h3>
-      <ul>
-        {analysis.source_references.map((reference) => (
-          <li key={reference}>{reference}</li>
-        ))}
-      </ul>
-
-      <h3>Findings</h3>
-      <ul>
-        {analysis.findings.map((finding) => (
-          <li key={finding.title}>
-            <strong>{finding.title}:</strong> {finding.evidence.join("; ")}
-          </li>
-        ))}
-      </ul>
-
-      <h3>Next Steps</h3>
-      <ol>
-        {analysis.next_steps.map((step) => (
-          <li key={step}>{step}</li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-function MetricDashboard({ metrics }) {
-  const items = [
-    ["Required Man Hours", metrics.required_man_hours],
-    ["Cost Impact", `EUR ${Number(metrics.cost_impact).toLocaleString()}`],
-    ["Engineers Affected", metrics.engineers_affected],
-    ["Teams Affected", metrics.teams_affected],
-    ["Project Delay Estimated", `${metrics.project_delay_days} d`],
-    ["Risk Category", metrics.risk_category],
-    ["Safety Impact", metrics.safety_impact],
-    ["AI Confidence Level", `${Math.round(metrics.ai_confidence_level * 100)}%`],
-  ];
-
-  return (
-    <section className="metrics-panel">
-      {items.map(([label, value]) => (
-        <div className="metric-tile" key={label}>
-          <span>{label}</span>
-          <strong>{value}</strong>
-        </div>
-      ))}
-    </section>
-  );
 }
 
 createRoot(document.getElementById("root")).render(

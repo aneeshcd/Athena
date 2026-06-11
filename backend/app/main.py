@@ -12,6 +12,8 @@ from app.document_reader import extract_upload_text
 from app.graph import GraphRepository, MemoryGraphRepository, create_repository
 from app.impact import analyze_change
 from app.models import GraphEdge, GraphNode, GraphPayload, ImpactAnalysisRequest, IngestionResponse, PdfReportRequest
+from app.plugins.neo4jGraphPlugin import close_repository as close_neo4j_graph_plugin
+from app.plugins.neo4jGraphPlugin.routes import router as neo4j_graph_router
 from app.report import build_pdf_report
 
 
@@ -25,6 +27,7 @@ async def lifespan(app: FastAPI):
     repository = create_repository(settings)
     repository.ensure_constraints()
     yield
+    close_neo4j_graph_plugin()
     if repository:
         repository.close()
 
@@ -38,6 +41,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(neo4j_graph_router)
 
 
 def get_repository() -> GraphRepository | MemoryGraphRepository:

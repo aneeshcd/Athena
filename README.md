@@ -1,13 +1,23 @@
-# Athena 
+# Athena
 
-Athena is a single-page systems engineering intelligence dashboard that turns requirement artifacts into a Neo4j-backed semantic knowledge graph, then uses GraphRAG-style traversals to analyze change impact.
+Athena is a minimal Neo4j knowledge graph prototype for requirement change management.
+
+The current prototype ingests an Excel artefact with three sheets:
+
+- `nodes`: `id`, `type`, `name`, `description`, `criticality`
+- `edges`: `source_id`, `target_id`, `relationship`, `description`
+- `ontology`: `source_entity`, `relationship`, `target_entity`
+
+It stores the graph in Neo4j, validates relationships against the declared ontology, identifies the best starting `Requirement` from engineer-entered change text, and traverses ontology-approved relationships to show impacted connected nodes.
+
+The prototype intentionally does not implement cost calculation, delay calculation, man-hour calculation, LLM summaries, vector embeddings, Text2Cypher, agentic RAG, or authentication changes.
 
 ## Architecture
 
 - Frontend: React, Vite, Cytoscape.js
 - Backend: FastAPI, Pydantic, Neo4j Python driver
-- AI layer: OpenAI structured outputs for extraction, embeddings for semantic vectors, and graph-grounded summary synthesis
-- Source of truth: Neo4j nodes and relationships, not the LLM
+- Neo4j plugin module: `backend/app/plugins/neo4jGraphPlugin`
+- Source of truth: Neo4j `GraphNode` and `OntologyRule` data
 
 ## Run Locally
 
@@ -27,28 +37,58 @@ Neo4j login:
 - Username: `neo4j`
 - Password: `athena-password`
 
-The app works without `OPENAI_API_KEY` by using a deterministic local extractor and graph-grounded summary fallback. Add an OpenAI key to enable LLM normalization, embeddings, and synthesized summaries.
+The compose file keeps the local frontend and backend host ports at `5173` and `8000`.
 
-## Pipeline
+## Environment
 
-1. Ingestion receives PDF, Excel, CSV, text, or Markdown files.
-2. A format profiler looks for likely requirement sections, sheet names, header aliases, IDs, owners, teams, verification columns, risk columns, and component allocations.
-3. Normalization extracts requirements, components, interfaces, risks, tests, people, and teams into strict Pydantic models. With `OPENAI_API_KEY`, the LLM uses the profiler output to handle inconsistent engineer-authored layouts; without a key, deterministic table and text parsers still extract common formats.
-4. Semantic processing embeds entity text, extracts relationships, and writes deterministic `MERGE` Cypher into Neo4j.
-5. Change analysis maps an engineer's change description to the best graph node and traverses downstream paths.
-6. Metrics aggregate impacted engineers, teams, effort, cost, delay, risk, safety, and AI confidence.
-7. Output generation returns graph JSON, reasoning paths, source references, metrics, and a PDF-ready summary.
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=athena-password
+NEO4J_DATABASE=neo4j
+```
 
-## Input Quality Handling
+`NEO4J_DATABASE` is optional and defaults to `neo4j`.
 
-Athena is designed for mixed engineering document quality. It can inspect spreadsheet-style and document-style inputs with inconsistent names such as `Req ID`, `Requirement Number`, `Object Text`, `Description`, `Shall Statement`, `Owner`, `DRI`, `Verification`, `Test Case`, `Component`, `Allocated To`, `Risk`, and `Safety Critical`.
+## Neo4j Graph Plugin
 
-When an OpenAI API key is configured, the LLM is instructed to infer where the requirement content lives, ignore revision-history or decorative content, preserve source references, and lower confidence when extraction is ambiguous. The graph database remains the deterministic source of truth after extraction.
+The plugin exposes:
 
-## Useful Endpoints
+- `ingestArtefact(filePath: str)`
+- `clearGraph()`
+- `getOntology()`
+- `searchRequirement(changeText: str)`
+- `analyzeRequirementChange(changeText: str, depth: int = 2)`
+- `getImpactGraph(requirementId: str, depth: int = 2)`
+- `validateEdgesAgainstOntology()`
 
-- `POST /api/ingest` uploads and normalizes an artifact.
-- `POST /api/analyze` runs impact analysis for a natural-language change.
-- `POST /api/report/pdf` generates a PDF report from the current dashboard state.
-- `GET /api/graph` returns the current graph.
-- `GET /health` checks backend and Neo4j connectivity.
+Dynamic labels and relationship types are sanitized before being inserted into Cypher. Spaces and hyphens become underscores, and unsafe identifiers are rejected.
+
+## API Endpoints
+
+- `POST /api/graph/ingest`: upload an Excel artefact and build the graph.
+- `POST /api/graph/impact-analysis`: identify the starting `Requirement` internally and return the impact map.
+- `POST /api/graph/requirement-search`: search matching `Requirement` nodes without exposing scores.
+- `POST /api/graph/impact`: traverse impacted nodes from a selected requirement.
+- `GET /api/graph/ontology`: return ontology rules.
+- `GET /api/graph/health`: verify Neo4j connectivity.
+
+Impact-analysis body:
+
+```json
+{
+  "changeText": "<engineer-entered requirement change text>"
+}
+```
+
+The backend uses full-text search internally to choose the most likely starting requirement, then returns the selected requirement and the existing impact graph. The frontend shows the impact map and impacted nodes/relationships instead of search rankings or relevance scores.
+
+## Tests
+
+From the backend folder:
+
+```powershell
+pytest
+```
+
+The basic tests cover Excel ingestion, ontology validation, the requirement-search contract, and the impact-traversal response contract.

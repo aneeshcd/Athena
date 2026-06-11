@@ -5,6 +5,7 @@
     sans-serif;
   background: #eef2f5;
   color: #121820;
+  font-size: 16px;
 }
 
 * {
@@ -25,7 +26,7 @@ input {
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
 }
 
 .topbar {
@@ -66,7 +67,7 @@ input {
 }
 
 .workspace {
-  height: calc(100vh - 178px);
+  height: calc(100vh - 75px);
   min-height: 560px;
   display: grid;
   grid-template-columns: minmax(260px, 25%) minmax(480px, 50%) minmax(280px, 25%);
@@ -92,6 +93,7 @@ input {
 .right-panel {
   border-right: 0;
   border-left: 1px solid #d7dee7;
+  overflow: auto;
 }
 
 .middle-panel {
@@ -124,7 +126,8 @@ input {
 
 .section-title h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 18px;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -167,7 +170,8 @@ textarea {
   padding: 12px;
   background: #f8fafc;
   color: #17202a;
-  line-height: 1.4;
+  font-size: 16px;
+  line-height: 1.45;
 }
 
 .primary-button,
@@ -181,6 +185,7 @@ textarea {
   justify-content: center;
   gap: 8px;
   cursor: pointer;
+  font-size: 16px;
 }
 
 .primary-button {
@@ -253,6 +258,10 @@ button:disabled {
 
 .legend .depth1 {
   background: #f4a261;
+}
+
+.legend .selected {
+  background: #111827;
 }
 
 .graph-canvas {
@@ -375,6 +384,128 @@ button:disabled {
   padding: 22px;
 }
 
+.empty-summary.compact {
+  flex: initial;
+  min-height: 150px;
+}
+
+.impact-details {
+  display: grid;
+  gap: 14px;
+}
+
+.selected-requirement {
+  padding: 10px;
+  border: 1px solid #d7dee7;
+  border-radius: 8px;
+  background: #edf7f5;
+  color: #17202a;
+  display: grid;
+  gap: 4px;
+}
+
+.selected-requirement span {
+  color: #166534;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.selected-requirement strong {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.selected-requirement small {
+  font-size: 14px;
+  color: #64748b;
+}
+
+.impact-section {
+  display: grid;
+  gap: 8px;
+}
+
+.impact-section h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #223042;
+}
+
+.impact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.impact-card {
+  padding: 9px 10px;
+  border: 1px solid #d7dee7;
+  border-radius: 8px;
+  background: #f8fafc;
+  display: grid;
+  gap: 3px;
+}
+
+.impact-card strong {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.impact-card span,
+.impact-empty {
+  font-size: 15px;
+  color: #334155;
+  line-height: 1.25;
+}
+
+.ontology-panel {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.ontology-panel h3 {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #223042;
+}
+
+.validation-box {
+  padding: 10px;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  background: #f0fdf4;
+  color: #166534;
+  display: grid;
+  gap: 3px;
+}
+
+.validation-box.warning {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.validation-box strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.validation-box span,
+.ontology-list span {
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.ontology-list {
+  display: grid;
+  gap: 6px;
+  color: #435466;
+}
+
 .summary-scroll {
   overflow: auto;
   padding-right: 4px;
@@ -415,42 +546,6 @@ button:disabled {
   margin: 0 0 7px;
 }
 
-.metrics-panel {
-  min-height: 104px;
-  padding: 12px;
-  background: #17202a;
-  display: grid;
-  grid-template-columns: repeat(8, minmax(112px, 1fr));
-  gap: 10px;
-  overflow-x: auto;
-}
-
-.metric-tile {
-  min-height: 78px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  background: #223042;
-  color: #d9e2ec;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.metric-tile span {
-  font-size: 12px;
-  color: #a8b7c7;
-  line-height: 1.2;
-}
-
-.metric-tile strong {
-  font-size: 19px;
-  color: #ffffff;
-  line-height: 1.1;
-  overflow-wrap: anywhere;
-}
-
 @media (max-width: 1120px) {
   .workspace {
     height: auto;
@@ -485,7 +580,4 @@ button:disabled {
     flex-direction: column;
   }
 
-  .metrics-panel {
-    grid-template-columns: repeat(2, minmax(130px, 1fr));
-  }
 }
