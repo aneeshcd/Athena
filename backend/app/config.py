@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -6,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 BACKEND_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+DOCKER_DEFAULT_NEO4J_URI = "bolt://neo4j:7687"
 
 
 class Settings(BaseSettings):
@@ -23,15 +25,16 @@ class Settings(BaseSettings):
     ollama_max_context_edges: int = 30
     ollama_max_description_chars: int = 180
     ollama_warmup_on_start: bool = False
-    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_uri: str = Field(DOCKER_DEFAULT_NEO4J_URI, validation_alias="NEO4J_URI")
     neo4j_user: str = Field("neo4j", validation_alias=AliasChoices("NEO4J_USERNAME", "NEO4J_USER"))
-    neo4j_password: str = "athena-password"
-    neo4j_database: str = "neo4j"
+    neo4j_password: str = Field("athena-password", validation_alias="NEO4J_PASSWORD")
+    neo4j_database: str = Field("neo4j", validation_alias="NEO4J_DATABASE")
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(
         env_file=(PROJECT_ENV_FILE, BACKEND_ENV_FILE, ".env"),
         extra="ignore",
+        populate_by_name=True,
     )
 
     @property
@@ -46,3 +49,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def running_in_docker() -> bool:
+    return Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1"

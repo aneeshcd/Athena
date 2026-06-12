@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -20,7 +21,8 @@ from app.plugins.neo4jGraphPlugin.types import ImpactGraph, LLMImpactAnalysisInp
 
 
 router = APIRouter(prefix="/api/graph", tags=["neo4j graph"])
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+NEO4J_UNREACHABLE_MESSAGE = "Neo4j is not reachable. Check NEO4J_URI and whether the Neo4j container is running."
 
 
 class RequirementSearchRequest(BaseModel):
@@ -48,6 +50,8 @@ class LLMTestRequest(BaseModel):
 
 @router.post("/ingest")
 async def ingest(file: UploadFile = File(...)):
+    settings = get_settings()
+    logger.info("[Ingest] Using Settings.neo4j_uri=%s", settings.neo4j_uri)
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Upload an Excel .xlsx or .xlsm artefact.")
     suffix = Path(file.filename).suffix
@@ -58,7 +62,11 @@ async def ingest(file: UploadFile = File(...)):
         return neo4jGraphPlugin.ingestArtefact(temp_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ServiceUnavailable, SessionExpired) as exc:
+        raise _neo4j_unreachable_error(exc)
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Neo4j graph ingest failed: {exc}") from exc
     finally:
         if "temp_path" in locals():
@@ -79,6 +87,8 @@ def requirement_search(request: RequirementSearchRequest):
             for match in matches
         ]
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Requirement search failed: {exc}") from exc
 
 
@@ -139,6 +149,8 @@ def impact_from_change(request: RequirementSearchRequest):
             request.debug,
         )
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Impact analysis failed: {exc}") from exc
 
 
@@ -147,6 +159,8 @@ def impact(request: ImpactRequest):
     try:
         return neo4jGraphPlugin.getImpactGraph(request.requirementId, request.depth)
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Impact traversal failed: {exc}") from exc
 
 
@@ -155,6 +169,8 @@ def ontology():
     try:
         return neo4jGraphPlugin.getOntology()
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Ontology lookup failed: {exc}") from exc
 
 
@@ -163,7 +179,8 @@ def health():
     try:
         return {"ok": neo4jGraphPlugin.get_repository().health()}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Neo4j connectivity failed: {exc}") from exc
+        logger.exception("Neo4j health check failed: %s", exc)
+        raise _neo4j_unreachable_error(exc)
 
 
 @router.get("/llm-health")
@@ -218,4 +235,30 @@ def validate():
     try:
         return neo4jGraphPlugin.validateEdgesAgainstOntology()
     except Exception as exc:
+        if _is_neo4j_connectivity_error(exc):
+            raise _neo4j_unreachable_error(exc)
         raise HTTPException(status_code=500, detail=f"Ontology validation failed: {exc}") from exc
+
+
+def _is_neo4j_connectivity_error(exc: Exception) -> bool:
+    if isinstance(exc, (ServiceUnavailable, SessionExpired)):
+        return True
+    if isinstance(exc, Neo4jError):
+        return False
+    message = str(exc).lower()
+    return any(
+        indicator in message
+        for indicator in (
+            "couldn't connect",
+            "failed to establish connection",
+            "connection refused",
+            "actively refused",
+            "failed to resolve",
+            "service unavailable",
+        )
+    )
+
+
+def _neo4j_unreachable_error(exc: Exception) -> HTTPException:
+    logger.exception("Neo4j is not reachable: %s", exc)
+    return HTTPException(status_code=503, detail=NEO4J_UNREACHABLE_MESSAGE)

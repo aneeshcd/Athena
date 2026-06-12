@@ -16,6 +16,7 @@ from app.plugins.neo4jGraphPlugin.types import (
     ImpactGraph,
     LLMImpactAnalysisInput,
     LLMImpactAnalysisResult,
+    RippleEffect,
     SelectedRequirement,
 )
 
@@ -26,6 +27,7 @@ HITL_NOTICE = (
 )
 logger = logging.getLogger(__name__)
 FAST_MODEL_CANDIDATES = ("qwen2.5:3b", "llama3.2:1b")
+GRAPH_SPECIFIC_TYPES = {"Subsystem", "SoftwareModule", "TestCase", "Test", "Risk", "Issue", "Document", "Requirement"}
 TYPE_PRIORITY = {
     "Requirement": 0,
     "Subsystem": 1,
@@ -39,6 +41,19 @@ TYPE_PRIORITY = {
     "Person": 8,
 }
 CRITICALITY_PRIORITY = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+MAX_RIPPLE_EFFECTS = 3
+FACT_CATEGORIES = {
+    "Requirement": "connectedRequirements",
+    "Subsystem": "connectedSubsystems",
+    "SoftwareModule": "connectedSoftwareModules",
+    "TestCase": "connectedTestCases",
+    "Test": "connectedTestCases",
+    "Risk": "connectedRisks",
+    "Issue": "connectedIssues",
+    "Document": "connectedDocuments",
+    "Team": "connectedTeams",
+}
+PROVIDER_WORD_PATTERN = re.compile(r"\b(?:Ollama|OpenAI|provider|model|fallback|llama[-_.:\w]*|gpt[-_.:\w]*)\b", re.IGNORECASE)
 
 
 class ImpactAnalysisUnavailable(RuntimeError):
@@ -114,7 +129,7 @@ def _generate_with_openai(
         logger.info("[LLM] Calling OpenAI model=%s", model)
         response = openai_client.chat.completions.create(
             model=model,
-            temperature=0.2,
+            temperature=0,
             response_format={"type": "json_object"},
             messages=_messages(_compact_context(input.changeText, input.selectedRequirement, input.impactGraph)),
         )
@@ -125,7 +140,7 @@ def _generate_with_openai(
         raise ImpactAnalysisFailed(f"OpenAI request failed: {_safe_error_message(exc)}") from exc
     analysis = _parse_analysis(content, "openai")
     logger.info("[LLM] OpenAI JSON parsed successfully")
-    return _finalize_analysis(analysis, input.impactGraph, "openai")
+    return _finalize_analysis(analysis, input.impactGraph, "openai", input.selectedRequirement)
 
 
 def _generate_with_ollama(
@@ -159,6 +174,9 @@ def _generate_with_ollama(
         first_content = _call_ollama(settings, context, strict=False, ollama_client=ollama_client)
         analysis = _parse_analysis(first_content, "ollama", input)
         logger.info("[LLM] Ollama JSON parsed successfully")
+        if _all_ripple_effects_generic(analysis, input.impactGraph):
+            logger.warning("[LLM][Ollama] ripple effects were generic; retrying once with stricter graph-specific prompt.")
+            raise ImpactAnalysisFailed("Generic ripple effects returned by LLM.")
         return _finalize_ollama_analysis(analysis, input, context)
     except ImpactAnalysisFailed as exc:
         logger.warning("[LLM][Ollama] first attempt failed; retrying once with shorter prompt. reason=%s", _safe_error_message(exc))
@@ -189,7 +207,7 @@ def _call_ollama(
         "stream": False,
         "format": "json",
         "keep_alive": "5m",
-        "options": {"temperature": 0.1, "num_predict": 700, "num_ctx": 2048},
+        "options": {"temperature": 0, "num_predict": 900, "num_ctx": 2048},
     }
     timeout_seconds = max(1, int(settings.ollama_timeout_ms / 1000))
     started = time.perf_counter()
@@ -313,7 +331,7 @@ def _call_ollama_prompt(settings: Settings, prompt: str) -> str:
         "stream": False,
         "format": "json",
         "keep_alive": "5m",
-        "options": {"temperature": 0.1, "num_predict": 96, "num_ctx": 1024},
+        "options": {"temperature": 0, "num_predict": 900, "num_ctx": 1024},
     }
     timeout_seconds = max(1, int(settings.ollama_timeout_ms / 1000))
     url = settings.ollama_base_url.rstrip("/") + "/api/chat"
@@ -344,20 +362,14 @@ def _generate_fallback(input: LLMImpactAnalysisInput, reason: str = "LLM provide
     affected_ids = [node.id for node in impacted_nodes]
     affected_types = sorted({node.type for node in impacted_nodes if node.type})
     type_phrase = ", ".join(affected_types) if affected_types else "connected graph elements"
-    summary = (
-        f"{input.selectedRequirement.id} - {input.selectedRequirement.name} is connected to "
-        f"{len(impacted_nodes)} impacted graph element(s), including {type_phrase}. Review these dependencies "
-        "before approving the requirement change."
-    )
     analysis = LLMImpactAnalysisResult(
         provider="fallback",
-        summary="AI analysis could not be generated reliably for this graph. Please review the impact map manually.",
-        rippleEffects=[],
-        suggestedNextSteps=[
-            "Review the selected requirement and confirm the intended change.",
-            "Inspect the highlighted impacted nodes and relationships in the graph.",
-            "Check connected test cases, risks, issues, and documents before approving the change.",
-        ],
+        summary=(
+            f"{_summary_prefix(input.selectedRequirement, input.impactGraph)} "
+            f"The graph contains {len(impacted_nodes)} connected element(s), including {type_phrase}."
+        ),
+        rippleEffects=_graph_derived_ripple_effects(input.impactGraph),
+        suggestedNextSteps=_graph_derived_next_steps(input.selectedRequirement, input.impactGraph),
         engineeringReviewChecklist=[
             "Confirm the selected requirement is correct.",
             "Confirm the impacted subsystem and software modules are relevant.",
@@ -372,17 +384,22 @@ def _generate_fallback(input: LLMImpactAnalysisInput, reason: str = "LLM provide
         ],
         humanInTheLoopNotice=HITL_NOTICE,
     )
-    return _finalize_analysis(analysis, input.impactGraph, "fallback")
+    return _finalize_analysis(analysis, input.impactGraph, "fallback", input.selectedRequirement)
 
 
 def _messages(context: dict[str, Any], strict: bool = False) -> list[dict[str, str]]:
     system_content = (
-        "You are an engineering impact-analysis assistant. Use only the provided graph context. "
-        "Do not invent nodes, systems, tests, risks, or relationships. Return only valid JSON. "
-        "No markdown. No comments. No text outside JSON."
+        "You are an engineering impact-analysis assistant. Use only the provided selected requirement, "
+        "impacted nodes, and relationships. Generate requirement-specific ripple effects from real graph areas. "
+        "Do not invent nodes, systems, tests, risks, issues, documents, software modules, subsystems, or relationships. "
+        "Return only valid JSON. No markdown. No comments. No text outside JSON. "
+        "Do not mention Ollama, OpenAI, provider, model, or fallback."
     )
     if strict:
-        system_content += " Return a complete compact JSON object only."
+        system_content += (
+            " Return a complete compact JSON object only. The previous response was too generic. "
+            "Use real node names from the graph in the summary and ripple effect areas."
+        )
     return [
         {"role": "system", "content": system_content},
         {
@@ -391,16 +408,26 @@ def _messages(context: dict[str, Any], strict: bool = False) -> list[dict[str, s
                 {
                     "task": "Generate concise JSON using exactly the requested schema.",
                     "rules": [
-                        "Use only the provided selectedRequirement, nodes, and edges.",
+                        "Use only the provided selectedRequirement, impactedNodes, impactedRelationships, impactFacts, and coverageFlags.",
+                        "Do not decide what is impacted; Neo4j impactFacts are the source of truth.",
                         "Do not invent node IDs, names, or relationships.",
+                        "Generate 2 to 3 rippleEffects when the graph has enough connected nodes.",
+                        "Generate 1 rippleEffect only when the graph is very small.",
+                        "Each ripple effect must reference a real area from the provided graph, such as a subsystem, software module, test case, risk, issue, document, or related requirement.",
+                        "Do not use generic area names like Knowledge graph impact unless there is no better graph-specific area.",
+                        "Use provided node IDs and node names where helpful.",
+                        "Use different ripple effect areas when possible.",
+                        "Do not repeat the same point.",
+                        "Minimum 1 rippleEffect when graph contains impacted nodes.",
                         "Do not make final decisions.",
                         "Return valid JSON only.",
                         "Do not include markdown.",
                         "Do not include trailing commas.",
                         "Return a complete JSON object.",
-                        "Maximum 3 rippleEffects.",
+                        f"Maximum {MAX_RIPPLE_EFFECTS} rippleEffects.",
                         "Maximum 5 suggestedNextSteps.",
                         "Keep each explanation under 35 words.",
+                        "Do not mention Ollama, OpenAI, provider, model, or fallback.",
                     ],
                     **context,
                     "requiredOutputSchema": {
@@ -409,9 +436,6 @@ def _messages(context: dict[str, Any], strict: bool = False) -> list[dict[str, s
                             {"area": "string", "explanation": "string"}
                         ],
                         "suggestedNextSteps": ["string"],
-                        "engineeringReviewChecklist": ["string"],
-                        "assumptionsAndLimitations": ["string"],
-                        "humanInTheLoopNotice": "string",
                     },
                 },
                 ensure_ascii=True,
@@ -442,9 +466,13 @@ def _compact_context(
         selected.pop("description", None)
     elif len(selected.get("description", "")) > max_description_chars:
         selected["description"] = selected["description"][:max_description_chars]
+    impact_facts = build_impact_facts(selected_requirement, impact_graph, max_description_chars)
+    coverage_flags = build_coverage_flags(impact_facts)
     return {
         "changeText": change_text,
         "selectedRequirement": selected,
+        "impactFacts": impact_facts,
+        "coverageFlags": coverage_flags,
         "impactedNodes": [
             {
                 "id": node.id,
@@ -470,6 +498,73 @@ def _compact_context(
             "totalEdges": total_edges,
             "truncated": len(limited_nodes) < total_nodes or len(limited_edges) < total_edges,
         },
+    }
+
+
+def build_impact_facts(
+    selected_requirement: SelectedRequirement,
+    impact_graph: ImpactGraph,
+    max_description_chars: int = 180,
+) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "selectedRequirement": {
+            "id": selected_requirement.id,
+            "name": selected_requirement.name,
+            "criticality": selected_requirement.criticality,
+        },
+        "connectedRequirements": [],
+        "connectedSubsystems": [],
+        "connectedSoftwareModules": [],
+        "connectedTestCases": [],
+        "connectedRisks": [],
+        "connectedIssues": [],
+        "connectedDocuments": [],
+        "connectedTeams": [],
+        "relationships": [],
+    }
+    for node in _sorted_nodes(impact_graph.nodes, selected_requirement.id):
+        if node.id == selected_requirement.id or node.status == "selected":
+            continue
+        category = FACT_CATEGORIES.get(node.type)
+        if not category:
+            continue
+        facts[category].append(_fact_node(node, max_description_chars))
+    for edge in _sorted_edges(impact_graph.edges):
+        facts["relationships"].append(
+            {
+                "source": edge.source,
+                "relationship": edge.relationship,
+                "target": edge.target,
+                "hop": edge.hop,
+            }
+        )
+    return facts
+
+
+def build_coverage_flags(impact_facts: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "hasSubsystemImpact": bool(impact_facts["connectedSubsystems"]),
+        "hasSoftwareImpact": bool(impact_facts["connectedSoftwareModules"]),
+        "hasVerificationImpact": bool(impact_facts["connectedTestCases"]),
+        "hasRiskImpact": bool(impact_facts["connectedRisks"]),
+        "hasIssueImpact": bool(impact_facts["connectedIssues"]),
+        "hasDocumentImpact": bool(impact_facts["connectedDocuments"]),
+        "hasRequirementRipple": bool(impact_facts["connectedRequirements"]),
+    }
+
+
+def _fact_node(node, max_description_chars: int) -> dict[str, Any]:
+    description = node.description or ""
+    if max_description_chars <= 0:
+        description = ""
+    elif len(description) > max_description_chars:
+        description = description[:max_description_chars]
+    return {
+        "id": node.id,
+        "name": node.name,
+        "criticality": node.criticality,
+        "hop": node.hop,
+        "description": description,
     }
 
 
@@ -533,18 +628,12 @@ def _coerce_ollama_json(content: str, input: LLMImpactAnalysisInput) -> LLMImpac
         source.get("explanation"),
         payload.get("summary"),
     ) or (
-        f"Ollama reviewed {input.selectedRequirement.id} - {input.selectedRequirement.name} "
+        f"AI reviewed {input.selectedRequirement.id} - {input.selectedRequirement.name} "
         f"against {len(impacted_nodes)} impacted graph node(s)."
     )
     ripple_effects = _ripple_effects(source.get("rippleEffects"))
     if not ripple_effects:
-        ripple_effects = [
-            {
-                "area": "Knowledge graph impact",
-                "explanation": "Ollama returned JSON that was normalized to the required response shape.",
-                "affectedNodes": affected_ids,
-            }
-        ]
+        ripple_effects = _graph_derived_ripple_effects(input.impactGraph)
     return LLMImpactAnalysisResult(
         provider="ollama",
         summary=summary,
@@ -593,8 +682,19 @@ def _finalize_analysis(
     analysis: LLMImpactAnalysisResult,
     impact_graph: ImpactGraph,
     provider: str,
+    selected_requirement: SelectedRequirement,
 ) -> LLMImpactAnalysisResult:
     analysis.provider = provider
+    impact_facts = build_impact_facts(selected_requirement, impact_graph)
+    analysis.summary = _final_summary(analysis.summary, selected_requirement, impact_graph)
+    analysis.rippleEffects = _sanitize_ripple_effects(
+        analysis.rippleEffects,
+        impact_graph,
+    )
+    analysis.suggestedNextSteps = _patch_suggested_next_steps(
+        _sanitize_string_list(analysis.suggestedNextSteps),
+        impact_facts,
+    )
     node_ids = {node.id for node in impact_graph.nodes}
     for effect in analysis.rippleEffects:
         effect.affectedNodes = [node_id for node_id in effect.affectedNodes if node_id in node_ids]
@@ -612,6 +712,304 @@ def _finalize_analysis(
     return analysis
 
 
+
+def _without_existing_review_prefix(summary: str) -> str:
+    return re.sub(
+        r"^AI reviewed\s+REQ[-_A-Za-z0-9]+\s+(?:—|-)\s+.*?(?:dependencies\.|graph node\(s\)\.)\s*",
+        "",
+        summary,
+        flags=re.IGNORECASE,
+    )
+
+
+def _summary_prefix(selected_requirement: SelectedRequirement, impact_graph: ImpactGraph) -> str:
+    names = _connected_node_names(impact_graph, limit=3)
+    if names:
+        return (
+            f"AI reviewed {selected_requirement.id} \u2014 {selected_requirement.name} "
+            f"for impacts involving {', '.join(names)}."
+        )
+    return f"AI reviewed {selected_requirement.id} \u2014 {selected_requirement.name}."
+
+
+def _final_summary(summary: str, selected_requirement: SelectedRequirement, impact_graph: ImpactGraph) -> str:
+    prefix = _summary_prefix(selected_requirement, impact_graph)
+    cleaned = _sanitize_text(summary)
+    if cleaned.startswith(prefix):
+        return cleaned
+    second_sentence = _without_existing_review_prefix(cleaned).strip()
+    if not second_sentence:
+        return prefix
+    return f"{prefix} {second_sentence}"
+
+
+def _sanitize_ripple_effects(ripple_effects, impact_graph: ImpactGraph) -> list[Any]:
+    clean_effects = []
+    seen = set()
+    for effect in ripple_effects:
+        effect.area = _sanitize_text(effect.area)
+        effect.explanation = _sanitize_text(effect.explanation)
+        if not effect.area or not effect.explanation:
+            continue
+        key = (effect.area.lower(), effect.explanation.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        clean_effects.append(effect)
+        if len(clean_effects) == MAX_RIPPLE_EFFECTS:
+            break
+    if clean_effects and not _all_effects_generic(clean_effects, impact_graph):
+        specific_effects = [effect for effect in clean_effects if not isGenericRippleEffect(effect)]
+        return specific_effects[:MAX_RIPPLE_EFFECTS] if specific_effects else clean_effects[:MAX_RIPPLE_EFFECTS]
+    impacted_nodes = [node for node in impact_graph.nodes if node.status != "selected"]
+    if not impacted_nodes:
+        return []
+    return _graph_derived_ripple_effects(impact_graph)
+
+
+def isGenericRippleEffect(effect: Any) -> bool:
+    area = _sanitize_text(getattr(effect, "area", "")).lower()
+    explanation = _sanitize_text(getattr(effect, "explanation", "")).lower()
+    return (
+        not area
+        or area in {"impact", "impacts", "knowledge graph", "knowledge graph impact"}
+        or "knowledge graph impact" in area
+        or "review the connected impacted nodes" in explanation
+        or "connected impacted nodes and relationships" in explanation
+    )
+
+
+def _all_ripple_effects_generic(analysis: LLMImpactAnalysisResult, impact_graph: ImpactGraph) -> bool:
+    return _analysis_is_generic(analysis, impact_graph)
+
+
+def _analysis_is_generic(analysis: LLMImpactAnalysisResult, impact_graph: ImpactGraph) -> bool:
+    if not _has_meaningful_impacted_nodes(impact_graph):
+        return False
+    return _is_generic_summary(analysis.summary, impact_graph) or _all_effects_generic(analysis.rippleEffects, impact_graph)
+
+
+def _is_generic_summary(summary: str, impact_graph: ImpactGraph) -> bool:
+    cleaned = _sanitize_text(summary).lower()
+    if not cleaned:
+        return True
+    has_node_name = any(name.lower() in cleaned for name in _connected_node_names(impact_graph, limit=12))
+    generic_phrase = (
+        "connected knowledge graph dependencies" in cleaned
+        or "connected graph element" in cleaned
+        or "review these dependencies" in cleaned
+        or "impact map" in cleaned
+    )
+    return generic_phrase and not has_node_name
+
+
+def _all_effects_generic(ripple_effects: list[Any], impact_graph: ImpactGraph) -> bool:
+    if not ripple_effects or not _has_meaningful_impacted_nodes(impact_graph):
+        return False
+    return all(isGenericRippleEffect(effect) for effect in ripple_effects)
+
+
+def _has_meaningful_impacted_nodes(impact_graph: ImpactGraph) -> bool:
+    return any(node.status != "selected" and node.type in GRAPH_SPECIFIC_TYPES for node in impact_graph.nodes)
+
+
+def _graph_derived_ripple_effects(impact_graph: ImpactGraph) -> list[RippleEffect]:
+    nodes_by_type: dict[str, list[Any]] = {}
+    for node in _sorted_nodes(impact_graph.nodes, ""):
+        if node.status == "selected":
+            continue
+        nodes_by_type.setdefault(node.type, []).append(node)
+
+    effects: list[RippleEffect] = []
+
+    def add_effect(area: str, explanation: str, types: tuple[str, ...]) -> None:
+        if len(effects) == MAX_RIPPLE_EFFECTS:
+            return
+        node_ids = [node.id for node_type in types for node in nodes_by_type.get(node_type, [])]
+        if not node_ids:
+            return
+        effects.append(RippleEffect(area=area, explanation=explanation, affectedNodes=node_ids[:8]))
+
+    subsystem = nodes_by_type.get("Subsystem", [])
+    if subsystem:
+        first = subsystem[0]
+        add_effect(
+            first.name or "System / subsystem impact",
+            "The selected requirement is linked to this subsystem, so engineers should review whether the change affects subsystem behavior or allocation.",
+            ("Subsystem",),
+        )
+    software = nodes_by_type.get("SoftwareModule", [])
+    if software:
+        first = software[0]
+        add_effect(
+            first.name or "Software module impact",
+            "The connected software module may need review to confirm that its behavior still satisfies the changed requirement.",
+            ("SoftwareModule",),
+        )
+    add_effect(
+        "Verification impact",
+        "Linked test cases may need updates or reruns to confirm the changed requirement remains verified.",
+        ("TestCase", "Test"),
+    )
+    add_effect(
+        "Risk and issue impact",
+        "Connected risks or issues should be reviewed to determine whether the change increases exposure or requires mitigation.",
+        ("Risk", "Issue"),
+    )
+    add_effect(
+        "Documentation impact",
+        "Linked specifications or analysis documents may need updates after engineering approval.",
+        ("Document",),
+    )
+    add_effect(
+        "Related requirement impact",
+        "Related requirements should be reviewed to confirm the change remains consistent across dependent requirements.",
+        ("Requirement",),
+    )
+
+    if effects:
+        return effects[:MAX_RIPPLE_EFFECTS]
+    impacted_nodes = [node for node in impact_graph.nodes if node.status != "selected"]
+    return [
+        RippleEffect(
+            area=impacted_nodes[0].name or impacted_nodes[0].id,
+            explanation="The selected requirement is linked to this impacted graph element and should be reviewed before approval.",
+            affectedNodes=[impacted_nodes[0].id],
+        )
+    ] if impacted_nodes else []
+
+
+def _graph_derived_next_steps(selected_requirement: SelectedRequirement, impact_graph: ImpactGraph) -> list[str]:
+    names_by_type: dict[str, list[str]] = {}
+    for node in _sorted_nodes(impact_graph.nodes, selected_requirement.id):
+        if node.status == "selected":
+            continue
+        if node.name:
+            names_by_type.setdefault(node.type, []).append(node.name)
+    steps = [f"Review {selected_requirement.id} with the responsible engineer and confirm the intended change."]
+    if names_by_type.get("Subsystem") or names_by_type.get("SoftwareModule"):
+        names = _first_names(names_by_type.get("Subsystem", []) + names_by_type.get("SoftwareModule", []), 2)
+        steps.append(f"Check impacted system and software areas: {names}.")
+    if names_by_type.get("TestCase") or names_by_type.get("Test"):
+        names = _first_names(names_by_type.get("TestCase", []) + names_by_type.get("Test", []), 2)
+        steps.append(f"Review linked verification coverage: {names}.")
+    if names_by_type.get("Risk") or names_by_type.get("Issue"):
+        names = _first_names(names_by_type.get("Risk", []) + names_by_type.get("Issue", []), 2)
+        steps.append(f"Assess connected risks or issues: {names}.")
+    if names_by_type.get("Document"):
+        steps.append(f"Update linked documents or specifications: {_first_names(names_by_type['Document'], 2)}.")
+    return steps[:5]
+
+
+def _connected_node_names(impact_graph: ImpactGraph, limit: int = 3) -> list[str]:
+    names = []
+    seen = set()
+    for node in _sorted_nodes(impact_graph.nodes, ""):
+        name = (node.name or node.id or "").strip()
+        if node.status == "selected" or not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        names.append(name)
+        seen.add(key)
+        if len(names) == limit:
+            break
+    return names
+
+
+def _first_names(names: list[str], limit: int) -> str:
+    return ", ".join(names[:limit])
+
+
+def _sanitize_string_list(items: list[str]) -> list[str]:
+    clean_items = []
+    for item in items:
+        cleaned = _sanitize_text(item)
+        if cleaned:
+            clean_items.append(cleaned)
+    return clean_items
+
+
+def _sanitize_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s{2,}", " ", PROVIDER_WORD_PATTERN.sub("AI", str(value))).strip()
+
+
+def _combined_public_text(summary: str, ripple_effects, suggested_next_steps: list[str]) -> str:
+    parts = [summary, *[effect.area for effect in ripple_effects], *[effect.explanation for effect in ripple_effects], *suggested_next_steps]
+    return " ".join(parts).lower()
+
+
+def _patch_suggested_next_steps(suggested_next_steps: list[str], impact_facts: dict[str, Any]) -> list[str]:
+    steps = [step for step in suggested_next_steps if step]
+    text = " ".join(steps).lower()
+    priorities = [
+        (
+            bool(impact_facts["selectedRequirement"]["id"]),
+            ("requirement", impact_facts["selectedRequirement"]["id"].lower()),
+            "Review the selected requirement and confirm the intended change.",
+        ),
+        (
+            bool(impact_facts["connectedSubsystems"] or impact_facts["connectedSoftwareModules"]),
+            ("subsystem", "software", "module"),
+            f"Review linked system and software areas: {_fact_names(impact_facts['connectedSubsystems'] + impact_facts['connectedSoftwareModules'])}.",
+        ),
+        (
+            bool(impact_facts["connectedTestCases"]),
+            ("test", "verification"),
+            f"Review linked verification test cases: {_fact_names(impact_facts['connectedTestCases'])}.",
+        ),
+        (
+            bool(impact_facts["connectedRisks"] or impact_facts["connectedIssues"]),
+            ("risk", "issue", "anomaly"),
+            f"Review linked risks and issues: {_fact_names(impact_facts['connectedRisks'] + impact_facts['connectedIssues'])}.",
+        ),
+        (
+            bool(impact_facts["connectedDocuments"]),
+            ("document", "specification"),
+            f"Review linked documents and specifications: {_fact_names(impact_facts['connectedDocuments'])}.",
+        ),
+    ]
+    for present, keywords, patch in priorities:
+        if present and not any(keyword in text for keyword in keywords):
+            steps.append(patch)
+            text = " ".join(steps).lower()
+    return _prioritize_steps(steps, impact_facts)[:5]
+
+
+def _prioritize_steps(steps: list[str], impact_facts: dict[str, Any]) -> list[str]:
+    unique_steps = []
+    seen = set()
+    for step in steps:
+        key = step.lower()
+        if key not in seen:
+            unique_steps.append(step)
+            seen.add(key)
+
+    def rank(step: str) -> int:
+        lower = step.lower()
+        if "requirement" in lower or impact_facts["selectedRequirement"]["id"].lower() in lower:
+            return 0
+        if any(word in lower for word in ("subsystem", "software", "module")):
+            return 1
+        if any(word in lower for word in ("verification", "test")):
+            return 2
+        if any(word in lower for word in ("risk", "issue", "anomaly")):
+            return 3
+        if any(word in lower for word in ("document", "specification")):
+            return 4
+        return 5
+
+    return sorted(unique_steps, key=rank)
+
+
+def _fact_names(items: list[dict[str, Any]], limit: int = 2) -> str:
+    names = [item.get("name") or item.get("id") for item in items if item.get("name") or item.get("id")]
+    return ", ".join(names[:limit]) if names else "the connected graph nodes"
+
+
 def _finalize_ollama_analysis(
     analysis: LLMImpactAnalysisResult,
     input: LLMImpactAnalysisInput,
@@ -625,7 +1023,7 @@ def _finalize_ollama_analysis(
             f"{stats.get('edgesSent')} of {stats.get('totalEdges')} edges."
         )
     logger.info("[LLM][Ollama] JSON parse completed")
-    return _finalize_analysis(analysis, input.impactGraph, "ollama")
+    return _finalize_analysis(analysis, input.impactGraph, "ollama", input.selectedRequirement)
 
 
 def _elapsed_ms(started: float) -> int:

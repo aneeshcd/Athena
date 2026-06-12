@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -8,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from app.ai import normalize_document
-from app.config import Settings, get_settings
+from app.config import DOCKER_DEFAULT_NEO4J_URI, Settings, get_settings, running_in_docker
 from app.document_reader import extract_upload_text
 from app.graph import GraphRepository, MemoryGraphRepository, create_repository
 from app.impact import analyze_change
@@ -19,7 +20,7 @@ from app.report import build_pdf_report
 
 
 repository: GraphRepository | MemoryGraphRepository | None = None
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -33,6 +34,11 @@ async def lifespan(app: FastAPI):
     logger.info("[LLM] ollamaMaxContextNodes=%s", settings.ollama_max_context_nodes)
     logger.info("[LLM] ollamaMaxContextEdges=%s", settings.ollama_max_context_edges)
     logger.info("[LLM] openaiConfigured=%s", bool(settings.openai_api_key))
+    logger.info("[Config] os.environ NEO4J_URI=%s", os.environ.get("NEO4J_URI", "<unset>"))
+    logger.info("[Config] Settings.neo4j_uri=%s", settings.neo4j_uri)
+    if running_in_docker() and "NEO4J_URI" not in os.environ and settings.neo4j_uri != DOCKER_DEFAULT_NEO4J_URI:
+        raise RuntimeError(f"Docker backend default NEO4J_URI must be {DOCKER_DEFAULT_NEO4J_URI}.")
+    logger.info("[Neo4j] Connecting to %s", settings.neo4j_uri)
     repository = create_repository(settings)
     repository.ensure_constraints()
     yield

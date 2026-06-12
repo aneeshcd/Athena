@@ -144,7 +144,7 @@ class LLMImpactAnalysisResult(BaseModel):
     suggestedNextSteps: list[str] = Field(default_factory=list)
     engineeringReviewChecklist: list[str] = Field(default_factory=list)
     assumptionsAndLimitations: list[str] = Field(default_factory=list)
-    humanInTheLoopNotice: str
+    humanInTheLoopNotice: str = ""
 
 
 class LLMImpactAnalysisResponse(BaseModel):
