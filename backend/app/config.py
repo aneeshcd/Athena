@@ -1,21 +1,38 @@
 from functools import lru_cache
+from pathlib import Path
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PROJECT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+BACKEND_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
 class Settings(BaseSettings):
     app_name: str = "Athena SE"
+    llm_provider: str = "ollama"
     openai_api_key: str | None = None
+    openai_model: str = "gpt-4.1-mini"
     openai_extraction_model: str = "gpt-4.1-mini"
     openai_summary_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+    ollama_base_url: str = "http://host.docker.internal:11434"
+    ollama_model: str = "llama3.2:3b"
+    ollama_timeout_ms: int = 300000
+    ollama_max_context_nodes: int = 20
+    ollama_max_context_edges: int = 30
+    ollama_max_description_chars: int = 180
+    ollama_warmup_on_start: bool = False
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = Field("neo4j", validation_alias=AliasChoices("NEO4J_USERNAME", "NEO4J_USER"))
     neo4j_password: str = "athena-password"
     neo4j_database: str = "neo4j"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(PROJECT_ENV_FILE, BACKEND_ENV_FILE, ".env"),
+        extra="ignore",
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

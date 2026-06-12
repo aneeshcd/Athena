@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -18,12 +19,20 @@ from app.report import build_pdf_report
 
 
 repository: GraphRepository | MemoryGraphRepository | None = None
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global repository
     settings = get_settings()
+    logger.info("[LLM] provider=%s", settings.llm_provider or "ollama")
+    logger.info("[LLM] ollamaBaseUrl=%s", settings.ollama_base_url)
+    logger.info("[LLM] ollamaModel=%s", settings.ollama_model)
+    logger.info("[LLM] ollamaTimeoutMs=%s", settings.ollama_timeout_ms)
+    logger.info("[LLM] ollamaMaxContextNodes=%s", settings.ollama_max_context_nodes)
+    logger.info("[LLM] ollamaMaxContextEdges=%s", settings.ollama_max_context_edges)
+    logger.info("[LLM] openaiConfigured=%s", bool(settings.openai_api_key))
     repository = create_repository(settings)
     repository.ensure_constraints()
     yield

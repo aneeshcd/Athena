@@ -25,7 +25,16 @@ services:
     ports:
       - "8000:8000"
     environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
+      OLLAMA_MAX_CONTEXT_NODES: ${OLLAMA_MAX_CONTEXT_NODES:-20}
+      OLLAMA_MAX_CONTEXT_EDGES: ${OLLAMA_MAX_CONTEXT_EDGES:-30}
+      OLLAMA_MAX_DESCRIPTION_CHARS: ${OLLAMA_MAX_DESCRIPTION_CHARS:-180}
+      OLLAMA_WARMUP_ON_START: ${OLLAMA_WARMUP_ON_START:-false}
       OPENAI_EXTRACTION_MODEL: ${OPENAI_EXTRACTION_MODEL:-gpt-4.1-mini}
       OPENAI_SUMMARY_MODEL: ${OPENAI_SUMMARY_MODEL:-gpt-4.1-mini}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
@@ -36,6 +45,8 @@ services:
     depends_on:
       neo4j:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build:

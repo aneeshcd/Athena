@@ -17,14 +17,18 @@ const initialGraph = { nodes: [], edges: [] };
 
 function App() {
   const [graph, setGraph] = useState(initialGraph);
+  const [graphVersion, setGraphVersion] = useState(0);
   const [file, setFile] = useState(null);
   const [changeText, setChangeText] = useState("");
   const [selectedRequirement, setSelectedRequirement] = useState(null);
   const [selectedElement, setSelectedElement] = useState(null);
-  const [ingestSummary, setIngestSummary] = useState(null);
-  const [ontology, setOntology] = useState([]);
+  const [impactAnalysis, setImpactAnalysis] = useState(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const [isAnalysisLoading, setIsAnalysisLoading] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [isBusy, setIsBusy] = useState(false);
+  const [noMatchMessage, setNoMatchMessage] = useState("");
+  const latestRequestIdRef = useRef("");
 
   async function uploadArtefact() {
     if (!file) {
@@ -42,11 +46,14 @@ function App() {
       });
       if (!response.ok) throw new Error(await response.text());
       const summary = await response.json();
-      setIngestSummary(summary);
-      setGraph(initialGraph);
+      setGraph({ nodes: [], edges: [] });
+      setGraphVersion((version) => version + 1);
       setSelectedRequirement(null);
       setSelectedElement(null);
-      setOntology(await fetchOntology());
+      setNoMatchMessage("");
+      setImpactAnalysis(null);
+      setAnalysisError("");
+      setIsAnalysisLoading(false);
       setStatus(
         `Loaded ${summary.nodes_created} nodes, ${summary.edges_created} relationships, and ${summary.ontology_rules_created} ontology rules.`,
       );
@@ -62,31 +69,88 @@ function App() {
       setStatus("Enter the requirement change text first.");
       return;
     }
+    const requestId = crypto.randomUUID();
+    latestRequestIdRef.current = requestId;
     setIsBusy(true);
+    setGraph({ nodes: [], edges: [] });
+    setGraphVersion((version) => version + 1);
+    setSelectedRequirement(null);
+    setSelectedElement(null);
+    setNoMatchMessage("");
+    setImpactAnalysis(null);
+    setAnalysisError("");
+    setIsAnalysisLoading(false);
     setStatus("Building impact map from the best matching Requirement...");
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/graph/impact-from-change`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changeText, depth: 2, requestId }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
+      if (payload.requestId !== latestRequestIdRef.current) return;
+      if (!payload.selectedRequirement) {
+        setSelectedRequirement(null);
+        setGraph({ nodes: [], edges: [] });
+        setGraphVersion((version) => version + 1);
+        setNoMatchMessage(payload.message || "No matching requirement found.");
+        setStatus(payload.message || "No matching requirement found.");
+        return;
+      }
+      setSelectedRequirement(payload.selectedRequirement);
+      setGraph({ nodes: payload.impactGraph.nodes || [], edges: payload.impactGraph.edges || [] });
+      setGraphVersion((version) => version + 1);
+      setSelectedElement(null);
+      setNoMatchMessage("");
+      setStatus(`Impact map loaded from ${payload.selectedRequirement.id}.`);
+      generateImpactAnalysis(payload, changeText, requestId);
+    } catch (error) {
+      if (requestId !== latestRequestIdRef.current) return;
+      setSelectedRequirement(null);
+      setGraph({ nodes: [], edges: [] });
+      setGraphVersion((version) => version + 1);
+      setNoMatchMessage("No matching requirement found.");
+      setImpactAnalysis(null);
+      setAnalysisError("");
+      setIsAnalysisLoading(false);
+      setStatus(`Impact analysis failed: ${error.message}`);
+    } finally {
+      if (requestId === latestRequestIdRef.current) {
+        setIsBusy(false);
+      }
+    }
+  }
+
+  async function generateImpactAnalysis(payload, submittedChangeText, requestId) {
+    if (!payload.selectedRequirement || !payload.impactGraph?.nodes?.length) return;
+    setIsAnalysisLoading(true);
+    setAnalysisError("");
+    setImpactAnalysis(null);
     try {
       const response = await fetch(`${API_BASE_URL}/api/graph/impact-analysis`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changeText, depth: 2 }),
+        body: JSON.stringify({
+          changeText: submittedChangeText,
+          selectedRequirement: payload.selectedRequirement,
+          impactGraph: payload.impactGraph,
+        }),
       });
       if (!response.ok) throw new Error(await response.text());
-      const payload = await response.json();
-      setSelectedRequirement(payload.selectedRequirement);
-      setGraph(payload.impactGraph);
-      setSelectedElement(null);
-      setStatus(`Impact map loaded from ${payload.selectedRequirement.id}.`);
+      const analysisPayload = await response.json();
+      if (requestId !== latestRequestIdRef.current) return;
+      setImpactAnalysis(analysisPayload.analysis);
+      setAnalysisError("");
     } catch (error) {
-      setStatus(`Impact analysis failed: ${error.message}`);
+      if (requestId !== latestRequestIdRef.current) return;
+      setImpactAnalysis(null);
+      setAnalysisError("AI analysis could not be generated for this graph. Please review the impact map manually.");
     } finally {
-      setIsBusy(false);
+      if (requestId === latestRequestIdRef.current) {
+        setIsAnalysisLoading(false);
+      }
     }
-  }
-
-  async function fetchOntology() {
-    const response = await fetch(`${API_BASE_URL}/api/graph/ontology`);
-    if (!response.ok) return [];
-    return response.json();
   }
 
   return (
@@ -148,7 +212,7 @@ function App() {
             </div>
             <Legend />
           </div>
-          <ImpactGraph graph={graph} onSelect={setSelectedElement} />
+          <ImpactGraph key={graphVersion} graph={graph} isLoading={isBusy} noMatchMessage={noMatchMessage} onSelect={setSelectedElement} />
           <GraphInspector element={selectedElement} />
         </section>
 
@@ -156,18 +220,18 @@ function App() {
           <div className="summary-header">
             <div className="section-title">
               <ShieldCheck size={18} />
-              <h2>Impacted Nodes & Relationships</h2>
+              <h2>Impact Analysis & Suggested Next Steps</h2>
             </div>
           </div>
-          <ImpactDetails selectedRequirement={selectedRequirement} graph={graph} />
-          <OntologyPanel ontology={ontology} ingestSummary={ingestSummary} />
+          <ImpactDetails selectedRequirement={selectedRequirement} isLoading={isBusy} noMatchMessage={noMatchMessage} />
+          <AIAnalysisPanel analysis={impactAnalysis} isLoading={isAnalysisLoading} error={analysisError} />
         </aside>
       </section>
     </main>
   );
 }
 
-function ImpactGraph({ graph, onSelect }) {
+function ImpactGraph({ graph, isLoading, noMatchMessage, onSelect }) {
   const ref = useRef(null);
   const cyRef = useRef(null);
   const hasGraph = graph.nodes.length > 0;
@@ -309,8 +373,8 @@ function ImpactGraph({ graph, onSelect }) {
     return (
       <div className="graph-empty">
         <Network size={30} />
-        <strong>No impact graph yet</strong>
-        <span>Ingest an Excel artefact, enter a change, and find impacted nodes.</span>
+        <strong>{isLoading ? "Building impact graph" : noMatchMessage || "No impact graph yet"}</strong>
+        <span>{isLoading ? "Tracing ontology-connected nodes and relationships." : "Ingest an Excel artefact, enter a change, and find impacted nodes."}</span>
       </div>
     );
   }
@@ -323,70 +387,94 @@ function ImpactGraph({ graph, onSelect }) {
   );
 }
 
-function ImpactDetails({ selectedRequirement, graph }) {
+function ImpactDetails({ selectedRequirement, isLoading, noMatchMessage }) {
   if (!selectedRequirement) {
     return (
       <div className="empty-summary compact">
         <AlertTriangle size={26} />
-        <p>The selected starting requirement and impacted graph details appear after analysis.</p>
+        <p>{isLoading ? "Computing the latest impact map..." : noMatchMessage || "The selected starting requirement and impacted graph details appear after analysis."}</p>
       </div>
     );
   }
-  const impactedNodes = graph.nodes.filter((node) => node.status === "impacted");
-  const selectedNode = graph.nodes.find((node) => node.id === selectedRequirement.id);
   return (
     <div className="impact-details">
       <div className="selected-requirement">
         <span>Selected Requirement</span>
         <strong>{selectedRequirement.id} - {selectedRequirement.name}</strong>
-        <small>{selectedRequirement.criticality || "No criticality"} | {selectedNode?.type || selectedRequirement.type}</small>
-      </div>
-
-      <div className="impact-section">
-        <h3>Impacted Nodes</h3>
-        <div className="impact-list">
-          {impactedNodes.length ? impactedNodes.map((node) => (
-            <div className="impact-card" key={node.id}>
-              <strong>{node.id} - {node.name}</strong>
-              <span>{node.type} | {node.criticality || "No criticality"}</span>
-            </div>
-          )) : <span className="impact-empty">No impacted nodes were returned.</span>}
-        </div>
-      </div>
-
-      <div className="impact-section">
-        <h3>Connected Relationships</h3>
-        <div className="impact-list">
-          {graph.edges.length ? graph.edges.map((edge) => (
-            <div className="impact-card" key={edge.id}>
-              <strong>{edge.relationship}</strong>
-              <span>{edge.source} - {edge.target}</span>
-            </div>
-          )) : <span className="impact-empty">No ontology relationships were returned.</span>}
-        </div>
+        <small>{selectedRequirement.criticality || "No criticality"} | {selectedRequirement.type}</small>
       </div>
     </div>
   );
 }
 
-function OntologyPanel({ ontology, ingestSummary }) {
+function AIAnalysisPanel({ analysis, isLoading, error }) {
+  if (isLoading) {
+    return (
+      <section className="ai-analysis-panel">
+        <div className="ai-badge">AI suggestion - engineer approval required</div>
+        <p className="analysis-muted">Generating local AI impact analysis. First run may take longer while the model loads...</p>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="ai-analysis-panel warning">
+        <div className="ai-badge">AI suggestion - engineer approval required</div>
+        <p className="analysis-muted">{error}</p>
+      </section>
+    );
+  }
+
+  if (!analysis) {
+    return (
+      <section className="ai-analysis-panel">
+        <div className="ai-badge">AI suggestion - engineer approval required</div>
+        <p className="analysis-muted">AI suggestions appear after a valid impact map is generated.</p>
+      </section>
+    );
+  }
+
   return (
-    <div className="ontology-panel">
-      {ingestSummary && (
-        <div className={ingestSummary.invalid_edges.length ? "validation-box warning" : "validation-box"}>
-          <strong>{ingestSummary.invalid_edges.length ? "Invalid ontology edges" : "Ontology validation passed"}</strong>
-          <span>{ingestSummary.invalid_edges.length} invalid relationship(s) found during ingest.</span>
-        </div>
-      )}
-      <h3>Ontology Rules</h3>
-      <div className="ontology-list">
-        {ontology.length ? ontology.map((rule) => (
-          <span key={`${rule.source_entity}-${rule.relationship}-${rule.target_entity}`}>
-            {rule.source_entity} - {rule.relationship} - {rule.target_entity}
-          </span>
-        )) : <span>No ontology rules loaded.</span>}
-      </div>
+    <section className="ai-analysis-panel">
+      <div className="ai-badge">AI suggestion - engineer approval required</div>
+      <AnalysisSection title="Analysis Summary">
+        <p>{analysis.summary}</p>
+      </AnalysisSection>
+      {analysis.rippleEffects?.length ? (
+        <AnalysisSection title="Ripple Effects">
+          {analysis.rippleEffects.map((effect) => (
+          <div className="analysis-card" key={`${effect.area}-${effect.affectedNodes?.join("-")}`}>
+            <strong>{effect.area}</strong>
+            <span>{effect.explanation}</span>
+          </div>
+          ))}
+        </AnalysisSection>
+      ) : null}
+      {analysis.suggestedNextSteps?.length ? <AnalysisList title="Suggested Next Steps" items={analysis.suggestedNextSteps} /> : null}
+      <div className="hitl-notice">AI-generated suggestions. Engineer review and approval required.</div>
+    </section>
+  );
+}
+
+function AnalysisSection({ title, children }) {
+  return (
+    <div className="analysis-section">
+      <h3>{title}</h3>
+      {children}
     </div>
+  );
+}
+
+function AnalysisList({ title, items = [] }) {
+  return (
+    <AnalysisSection title={title}>
+      {items.length ? (
+        <ul className="analysis-list">
+          {items.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      ) : <p className="analysis-muted">No items returned.</p>}
+    </AnalysisSection>
   );
 }
 

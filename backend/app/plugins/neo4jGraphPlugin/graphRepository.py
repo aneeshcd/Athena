@@ -125,7 +125,7 @@ class Neo4jGraphRepository:
                        node.description AS description,
                        node.criticality AS criticality,
                        score
-                ORDER BY score DESC
+                ORDER BY score DESC, id ASC
                 LIMIT 5
                 """,
                 {"changeText": change_text},
@@ -133,12 +133,12 @@ class Neo4jGraphRepository:
             return [RequirementCandidate(**dict(row)) for row in rows]
 
     def get_impact_graph(self, requirement_id: str, depth: int = 2) -> ImpactGraph:
-        safe_depth = max(1, min(int(depth or 2), 5))
+        safe_depth = _safe_depth(depth)
         with self._session() as session:
             rows = session.run(
                 f"""
                 MATCH (rule:OntologyRule)
-                WITH collect(rule.relationship) AS allowedRelationships
+                WITH collect(DISTINCT rule.relationship) AS allowedRelationships
                 MATCH path = (start:Requirement {{id: $requirementId}})-[rels*1..{safe_depth}]-(impacted:GraphNode)
                 WHERE all(r IN rels WHERE type(r) IN allowedRelationships)
                 RETURN path
@@ -147,10 +147,16 @@ class Neo4jGraphRepository:
             )
             nodes: dict[str, ImpactNode] = {}
             edges: dict[str, ImpactEdge] = {}
+            node_hops: dict[str, int] = {requirement_id: 0}
             for row in rows:
                 path = row["path"]
-                for node in path.nodes:
+                for index, node in enumerate(path.nodes):
                     node_id = node["id"]
+                    hop = 0 if node_id == requirement_id else min(node_hops.get(node_id, safe_depth), index)
+                    node_hops[node_id] = hop
+                    existing = nodes.get(node_id)
+                    if existing and existing.hop is not None and existing.hop <= hop:
+                        continue
                     nodes[node_id] = ImpactNode(
                         id=node_id,
                         label=node_id,
@@ -159,12 +165,16 @@ class Neo4jGraphRepository:
                         description=node.get("description", ""),
                         criticality=node.get("criticality", ""),
                         status="selected" if node_id == requirement_id else "impacted",
+                        hop=hop,
                     )
-                for rel in path.relationships:
+                for index, rel in enumerate(path.relationships):
                     source = rel.start_node["id"]
                     target = rel.end_node["id"]
                     relationship = rel.type
-                    edge_id = f"{source}->{relationship}->{target}"
+                    edge_id = f"{source}::{relationship}::{target}"
+                    hop = index + 1
+                    if edge_id in edges and edges[edge_id].hop is not None and edges[edge_id].hop <= hop:
+                        continue
                     edges[edge_id] = ImpactEdge(
                         id=edge_id,
                         source=source,
@@ -172,12 +182,16 @@ class Neo4jGraphRepository:
                         relationship=relationship,
                         description=rel.get("description", ""),
                         status="ontology-link",
+                        hop=hop,
                     )
             if requirement_id not in nodes:
                 node = self._get_node(requirement_id)
                 if node:
                     nodes[requirement_id] = node
-            return ImpactGraph(nodes=list(nodes.values()), edges=list(edges.values()))
+            return ImpactGraph(
+                nodes=sorted(nodes.values(), key=lambda node: (node.hop if node.hop is not None else 99, node.id)),
+                edges=sorted(edges.values(), key=lambda edge: (edge.hop if edge.hop is not None else 99, edge.id)),
+            )
 
     def validate_edges_against_ontology(self) -> OntologyValidationResult:
         with self._session() as session:
@@ -229,6 +243,7 @@ class Neo4jGraphRepository:
                 description=node.get("description", ""),
                 criticality=node.get("criticality", ""),
                 status="selected",
+                hop=0,
             )
 
     def _session(self):
@@ -237,3 +252,11 @@ class Neo4jGraphRepository:
 
 def _type_from_labels(labels) -> str:
     return next((label for label in labels if label not in {"GraphNode"}), "GraphNode")
+
+
+def _safe_depth(depth: int) -> int:
+    try:
+        parsed = int(depth)
+    except (TypeError, ValueError):
+        return 2
+    return max(1, min(parsed, 3))
